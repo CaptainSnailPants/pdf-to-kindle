@@ -1,0 +1,18 @@
+#!/bin/zsh
+
+APP_ROOT="${0:A:h}/.."
+cd "$APP_ROOT/Resources" || exit 1
+
+LOG_FILE="${TMPDIR:-/tmp}/pdf-til-kindle.log"
+: > "$LOG_FILE"
+PYTHON_BIN="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3)"
+fi
+
+"$PYTHON_BIN" app.py >> "$LOG_FILE" 2>&1
+STATUS=$?
+if (( STATUS != 0 )); then
+  /usr/bin/osascript -e 'display dialog "PDF til Kindle kunne ikke starte. Se pdf-til-kindle.log i din midlertidige mappe." buttons {"OK"} default button "OK" with icon stop'
+fi
+exit $STATUS
