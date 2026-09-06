@@ -297,6 +297,47 @@ class ImagePipelineTests(unittest.TestCase):
         self.assertTrue(any("· 2 sek. gået" in message for message in statuses))
         self.assertEqual(statuses[-1], "OpenAI-svar modtaget")
 
+    def test_openai_reaches_delayed_recovery_attempt_with_same_idempotency_key(self):
+        class FakeResponse:
+            headers = {"x-request-id": "req-recovered"}
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self):
+                return b'{"output": []}'
+        failures = [TimeoutError("temporary timeout") for _ in range(4)]
+        with mock.patch.object(
+                converter.urllib.request, "urlopen",
+                side_effect=[*failures, FakeResponse()]) as request:
+            payload = converter._openai_response(
+                {"model": "test", "input": "test"},
+                converter.ConversionOptions("Book", api_key="x", ai_model="test"),
+                max_attempts=5, attempt_timeout=10, retry_delays=(0, 0, 0, 0))
+        self.assertEqual(payload, {"output": []})
+        self.assertEqual(request.call_count, 5)
+        keys = {
+            call.args[0].get_header("Idempotency-key")
+            for call in request.call_args_list
+        }
+        self.assertEqual(len(keys), 1)
+        self.assertNotIn(None, keys)
+
+    def test_openai_does_not_retry_permanent_authentication_error(self):
+        error = converter.urllib.error.HTTPError(
+            "https://api.openai.com/v1/responses", 401, "Unauthorized", {},
+            io.BytesIO(b'{"error":{"type":"invalid_api_key","message":"Invalid key"}}'),
+        )
+        with mock.patch.object(converter.urllib.request, "urlopen", side_effect=error) as request:
+            with self.assertRaises(converter.AIServiceError) as raised:
+                converter._openai_response(
+                    {"model": "test", "input": "test"},
+                    converter.ConversionOptions("Book", api_key="x", ai_model="test"),
+                    max_attempts=6, attempt_timeout=10, retry_delays=(0,))
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(raised.exception.status_code, 401)
+        self.assertEqual(request.call_count, 1)
+
     def test_response_text_joins_all_output_text_parts(self):
         payload = {
             "id": "resp_test", "status": "completed",

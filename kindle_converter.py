@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,11 @@ class ConversionCancelled(Exception):
 
 class AIServiceError(RuntimeError):
     """Raised when OpenAI is unavailable after safe retries."""
+
+    def __init__(self, message, *, retryable=False, status_code=None):
+        super().__init__(message)
+        self.retryable = bool(retryable)
+        self.status_code = status_code
 
 
 class AIStructuredOutputError(RuntimeError):
@@ -157,7 +163,8 @@ def recommend_openai_models(api_key: str, model_ids: list[str], needs_images: bo
                             "strict": True, "schema": schema}},
     }
     options = ConversionOptions("Model recommendation", "", "eng", api_key=api_key, ai_model=recommender)
-    parsed = _model_json(_response_text(_openai_response(body, options)))
+    parsed = _model_json(_response_text(_openai_response(
+        body, options, max_attempts=2, attempt_timeout=90, retry_delays=(2,))))
     recommendations = parsed.get("recommendations", []) if isinstance(parsed, dict) else []
     valid, used = [], set()
     for item in recommendations:
@@ -802,11 +809,20 @@ def _model_json(text: str):
 def _openai_response(body: dict, options: ConversionOptions,
                      cancel_event: threading.Event | None = None,
                      status=lambda message: None,
-                     max_attempts: int = 4) -> dict:
+                     max_attempts: int = 6,
+                     attempt_timeout: int = 180,
+                     retry_delays: tuple[int, ...] = (2, 8, 30, 90, 180)) -> dict:
     max_attempts = max(1, int(max_attempts))
+    attempt_timeout = max(10, int(attempt_timeout))
+    client_request_id = str(uuid.uuid4())
     request = urllib.request.Request(
         "https://api.openai.com/v1/responses", data=json.dumps(body).encode("utf-8"), method="POST",
-        headers={"Authorization": f"Bearer {options.api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {options.api_key}",
+            "Content-Type": "application/json",
+            "Idempotency-Key": client_request_id,
+            "X-Client-Request-Id": client_request_id,
+        },
     )
     for attempt in range(max_attempts):
         if cancel_event and cancel_event.is_set():
@@ -816,10 +832,16 @@ def _openai_response(body: dict, options: ConversionOptions,
                     options.ai_model, attempt + 1, max_attempts)
         def perform_request():
             try:
-                with urllib.request.urlopen(request, timeout=90, context=_ssl_context()) as response:
-                    result_queue.put(("ok", response.read()))
+                with urllib.request.urlopen(
+                        request, timeout=max(10, attempt_timeout - 10), context=_ssl_context()) as response:
+                    headers = {
+                        key.casefold(): value
+                        for key, value in getattr(response, "headers", {}).items()
+                    }
+                    result_queue.put(("ok", response.read(), headers))
             except urllib.error.HTTPError as exc:
-                result_queue.put(("http", exc.code, exc.read()))
+                headers = {key.casefold(): value for key, value in (exc.headers.items() if exc.headers else [])}
+                result_queue.put(("http", exc.code, exc.read(), headers))
             except Exception as exc:
                 result_queue.put(("error", exc))
         threading.Thread(target=perform_request, daemon=True).start()
@@ -833,8 +855,9 @@ def _openai_response(body: dict, options: ConversionOptions,
                 break
             except queue.Empty:
                 elapsed = int(time.monotonic() - started)
-                if elapsed >= 100:
-                    result = ("error", TimeoutError("OpenAI-kaldet overskred den absolutte tidsgrænse på 100 sekunder"))
+                if elapsed >= attempt_timeout:
+                    result = ("error", TimeoutError(
+                        f"OpenAI-kaldet overskred tidsgrænsen på {attempt_timeout} sekunder"))
                     break
                 if elapsed != last_second:
                     status(f"Venter på OpenAI · forsøg {attempt + 1} af {max_attempts} · {elapsed} sek. gået")
@@ -842,14 +865,16 @@ def _openai_response(body: dict, options: ConversionOptions,
         if result[0] == "ok":
             try:
                 payload = json.loads(result[1])
-                logger.info("OpenAI request completed: model=%s attempt=%s/%s elapsed=%.1fs",
-                            options.ai_model, attempt + 1, max_attempts, time.monotonic() - started)
+                request_id = result[2].get("x-request-id", "")
+                logger.info("OpenAI request completed: model=%s attempt=%s/%s elapsed=%.1fs request_id=%s",
+                            options.ai_model, attempt + 1, max_attempts,
+                            time.monotonic() - started, request_id)
                 status("OpenAI-svar modtaget")
                 return payload
             except json.JSONDecodeError as exc:
-                raise AIServiceError("OpenAI returnerede et ugyldigt HTTP-svar.") from exc
+                raise AIServiceError("OpenAI returnerede et ugyldigt HTTP-svar.", retryable=True) from exc
         if result[0] == "http":
-            code, raw_detail = result[1], result[2].decode("utf-8", "replace")
+            code, raw_detail, response_headers = result[1], result[2].decode("utf-8", "replace"), result[3]
             error_code, detail = "", raw_detail
             try:
                 error = json.loads(raw_detail).get("error", {})
@@ -861,23 +886,43 @@ def _openai_response(body: dict, options: ConversionOptions,
             if not retryable or attempt == max_attempts - 1:
                 if error_code == "insufficient_quota":
                     detail = "API-kontoens kvote er opbrugt."
-                logger.error("OpenAI HTTP failure: status=%s code=%s attempt=%s/%s",
-                             code, error_code, attempt + 1, max_attempts)
-                raise AIServiceError(f"OpenAI kunne ikke gennemføre behandlingen: {detail}")
+                logger.error("OpenAI HTTP failure: status=%s code=%s attempt=%s/%s request_id=%s",
+                             code, error_code, attempt + 1, max_attempts,
+                             response_headers.get("x-request-id", ""))
+                raise AIServiceError(
+                    f"OpenAI kunne ikke gennemføre behandlingen: {detail}",
+                    retryable=retryable, status_code=code)
         else:
             exc = result[1]
             if attempt == max_attempts - 1:
                 reason = getattr(exc, "reason", str(exc))
                 logger.error("OpenAI connection failure after retries: %s", reason)
-                raise AIServiceError(f"Forbindelsen til OpenAI fejlede efter flere forsøg: {reason}")
-        status(f"Midlertidig OpenAI-fejl · nyt forsøg {attempt + 2} af {max_attempts}")
-        logger.warning("OpenAI request retry scheduled: next_attempt=%s/%s", attempt + 2, max_attempts)
-        deadline = time.monotonic() + 2 ** attempt
+                raise AIServiceError(
+                    f"Forbindelsen til OpenAI fejlede efter flere forsøg: {reason}", retryable=True)
+        configured_delay = retry_delays[min(attempt, len(retry_delays) - 1)] if retry_delays else 0
+        retry_after = 0
+        if result[0] == "http":
+            try:
+                retry_after = max(0, round(float(response_headers.get("retry-after", 0))))
+            except (TypeError, ValueError):
+                retry_after = 0
+        delay = max(configured_delay, retry_after)
+        logger.warning("OpenAI request retry scheduled: next_attempt=%s/%s delay=%ss client_request_id=%s",
+                       attempt + 2, max_attempts, delay, client_request_id)
+        deadline = time.monotonic() + delay
+        last_remaining = None
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
                 raise ConversionCancelled("Konverteringen blev afbrudt.")
+            remaining = max(1, math.ceil(deadline - time.monotonic()))
+            if remaining != last_remaining:
+                status(
+                    f"Midlertidig OpenAI-fejl · forsøg {attempt + 2} af {max_attempts} "
+                    f"starter om {_time_text(remaining)}"
+                )
+                last_remaining = remaining
             time.sleep(0.1)
-    raise AIServiceError("OpenAI kunne ikke gennemføre behandlingen.")
+    raise AIServiceError("OpenAI kunne ikke gennemføre behandlingen.", retryable=True)
 
 
 def _ai_request(items: list[dict], options: ConversionOptions, cancel_event: threading.Event | None,

@@ -12,10 +12,11 @@ Under konverteringen deaktiveres alle indstillinger og handlingsknapper undtagen
 
 ## Fejltolerance
 
-- Midlertidige OpenAI-fejl, timeouts og rate limits forsøges automatisk igen op til fire gange med stigende ventetid.
+- Midlertidige OpenAI-fejl, timeouts og rate limits forsøges automatisk igen op til seks gange. Efter de første hurtige genforsøg bruger appen længere, synlige pauser, så en kortvarig API- eller netværksforstyrrelse sent i en stor bog ikke straks sender resten over på lokal OCR.
 - AI-tekst opdeles i korte portioner på cirka 3.500 tegn. Under hvert API-kald vises faktisk forløbet ventetid og aktuelt forsøg; det lokale ETA skjules. Efter første afsluttede AI-kald beregnes resterende AI-tid ud fra de målte svartider.
 - Netværkskald kører i en separat afbrydelig tråd, så **Afbryd** reagerer med det samme i stedet for at vente på HTTP-timeout.
-- Ventestatus indeholder altid den overordnede enhed, eksempelvis **Tekstportion 3 af 12** eller **Billedside 4 af 20**, så et nyt API-kald ikke ligner en nulstillet løkke. Hvert forsøg har desuden en absolut grænse på 100 sekunder, også hvis netværksforbindelsen ikke udløser sin egen timeout.
+- Ventestatus indeholder altid den overordnede enhed, eksempelvis **Tekstportion 3 af 12** eller **Billedside 4 af 20**, så et nyt API-kald ikke ligner en nulstillet løkke. Hvert forsøg har en absolut grænse på 180 sekunder. Mellem forsøgene tæller status ned gennem pauser på normalt 2, 8, 30, 90 og 180 sekunder; en eventuel `Retry-After`-anvisning fra API'et respekteres, hvis den er længere.
+- Alle transportgenforsøg for samme tekstportion bruger den samme idempotency-nøgle. Dermed kan appen sikkert prøve igen, hvis forbindelsen tabes efter afsendelsen, uden at et allerede modtaget kald bevidst oprettes som en ny opgave. Klient- og server-request-ID logges uden dokumenttekst eller API-nøgle, så vedvarende fejl kan spores.
 - Opbrugt API-kvote, ugyldig nøgle, ugyldigt modelsvar eller vedvarende netværksfejl kasserer ikke OCR-arbejdet. Appen færdiggør automatisk en lokal EPUB og fortæller tydeligt, hvilken AI-del der blev sprunget over.
 - AI-tekstkorrektioner bevares portionsvis. Hvis en senere portion fejler, beholdes rettelserne fra alle gennemførte portioner, mens kun den berørte portion falder tilbage til OCR-teksten.
 - AI-svar til tekst og illustrationer kræves som strengt struktureret JSON efter et schema. Parseren kan desuden udtrække JSON, hvis en model alligevel tilføjer forklarende tekst omkring svaret.
