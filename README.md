@@ -38,6 +38,14 @@ Under konverteringen viser appen et løbende estimat for den resterende tid. Kna
 
 Appen fjerner automatisk sidetal samt sidehoveder og sidefødder, der gentages på tværs af dokumentet.
 
+## Selvstændig macOS-app
+
+Kør `./build_standalone.command` for at bygge `standalone-dist/PDF til Kindle.app`. Denne udgave indeholder Python, Pillow, PyMuPDF, Tesseract og engelske OCR-data og kan flyttes ud af projektmappen eller lægges i Programmer. Poppler er ikke nødvendigt i standalone-udgaven, fordi PDF-sider renderes med den indbyggede PyMuPDF-runtime.
+
+Andre understøttede OCR-sprog downloades fortsat først, når de vælges. I standalone-udgaven gemmes de i `~/Library/Application Support/PDF til Kindle/tessdata`, så app-pakken ikke behøver at være skrivbar.
+
+Builden er ad hoc-signeret lokalt og kræver ikke et Apple Developer-certifikat. Den er beregnet til den Mac-arkitektur, den bygges på; denne projektbuild er derfor Intel/x86_64. Første start kan kræve højreklik → **Åbn**, fordi appen ikke er notariseret af Apple.
+
 Kindle-kapitler oprettes ud fra tydelige kapitelmarkører og OCR-typografi. Markører som **Kapitel 3**, **Del II** og nummererede titler genkendes direkte. En kort typografisk overskrift kan også starte et kapitel, når den står først på en side efter en passende mængde brødtekst. Almindelige PDF-sideskift opretter ikke længere kapitler.
 
 Den valgfrie **AI-efterbehandling** sender OCR-teksten i mindre portioner til OpenAI Responses API. Modelmenuen hentes dynamisk ud fra de modeller, API-projektet har adgang til. Når OCR er færdig, viser appen estimerede inputtokens, outputtokens og samlet tokenforbrug og beder om godkendelse, før teksten sendes. Modellen instrueres i kun at rette tydelige OCR-fejl, orddeling, mellemrum og tegnsætning uden at forkorte, oversætte eller omskrive teksten. Funktionen er slået fra som standard og kræver en OpenAI API-nøgle. Nøglen kan gemmes sikkert i macOS-nøglering. API-forbrug afregnes separat af OpenAI og er ikke nødvendigvis inkluderet i et ChatGPT-abonnement.

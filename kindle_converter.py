@@ -4,6 +4,7 @@ import html
 import csv
 import io
 import math
+import os
 import sys
 import statistics
 import json
@@ -82,7 +83,24 @@ LANGUAGE_DATA_URL = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fa
 
 
 def _local_tessdata_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path.home() / "Library" / "Application Support" / "PDF til Kindle" / "tessdata"
     return Path(__file__).resolve().parent / "tessdata"
+
+
+def _resource_root() -> Path:
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+
+
+def _bundled_tessdata_dir() -> Path:
+    return _resource_root() / "tessdata"
+
+
+def _command_environment(command: list[str]) -> dict[str, str]:
+    environment = os.environ.copy()
+    if command and Path(command[0]).name == "tesseract" and _bundled_tessdata_dir().exists():
+        environment["TESSDATA_PREFIX"] = str(_bundled_tessdata_dir())
+    return environment
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -207,6 +225,9 @@ class BookChapter:
 
 
 def _tool(name: str) -> str:
+    bundled_tool = _resource_root() / "tools" / name
+    if bundled_tool.is_file():
+        return str(bundled_tool)
     path = shutil.which(name)
     if path:
         return path
@@ -223,7 +244,8 @@ def _tool(name: str) -> str:
 def available_ocr_languages() -> list[str]:
     try:
         out = subprocess.run([_tool("tesseract"), "--list-langs"], check=True, text=True,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=_command_environment([_tool("tesseract")])).stdout
         installed = {line.strip() for line in out.splitlines()[1:] if line.strip()}
         if _local_tessdata_dir().exists():
             installed.update(path.stem for path in _local_tessdata_dir().glob("*.traineddata"))
@@ -270,7 +292,8 @@ def ensure_ocr_language(code: str, progress=lambda message, fraction: None,
 
 
 def _run(command: list[str], cancel_event: threading.Event | None = None) -> str:
-    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               env=_command_environment(command))
     while process.poll() is None:
         if cancel_event and cancel_event.is_set():
             process.terminate()
@@ -1343,9 +1366,9 @@ def _render_page(pdf_path: Path, page_number: int, output_prefix: Path, dpi: int
                  cancel_event: threading.Event | None, image_format: str = "jpeg") -> Path:
     suffix = ".png" if image_format == "png" else ".jpg"
     rendered = output_prefix.with_suffix(suffix)
-    # Keep the established Poppler JPEG render for OCR. PyMuPDF is used only
-    # for the new on-demand high-resolution final image render.
-    if fitz is not None and image_format == "png":
+    # PyMuPDF is bundled in the standalone app and handles both the OCR render
+    # and high-resolution final crops. Poppler remains a source-mode fallback.
+    if fitz is not None:
         try:
             if cancel_event and cancel_event.is_set():
                 raise ConversionCancelled("Konverteringen blev afbrudt.")

@@ -59,6 +59,37 @@ class ImagePipelineTests(unittest.TestCase):
         self.assertTrue(converter._should_process_images(text_and_images))
         self.assertTrue(converter._should_process_images(local_only))
 
+    def test_frozen_app_uses_user_writable_tessdata_directory(self):
+        with mock.patch.object(converter.sys, "frozen", True, create=True), \
+                mock.patch.object(converter.Path, "home", return_value=self.root):
+            self.assertEqual(
+                converter._local_tessdata_dir(),
+                self.root / "Library" / "Application Support" / "PDF til Kindle" / "tessdata",
+            )
+
+    def test_bundled_tool_has_priority_in_frozen_resource_directory(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        bundled = tools / "tesseract"
+        bundled.write_text("test")
+        with mock.patch.object(converter.sys, "_MEIPASS", str(self.root), create=True):
+            self.assertEqual(converter._tool("tesseract"), str(bundled))
+
+    @unittest.skipIf(converter.fitz is None, "PyMuPDF is not available")
+    def test_jpeg_ocr_page_render_uses_pymupdf_without_poppler(self):
+        pdf_path = self.root / "render.pdf"
+        document = converter.fitz.open()
+        page = document.new_page(width=300, height=400)
+        page.insert_text((40, 80), "Standalone render")
+        document.save(pdf_path)
+        document.close()
+        with mock.patch.object(converter, "_run", side_effect=AssertionError("Poppler was called")):
+            rendered = converter._render_page(pdf_path, 1, self.root / "rendered", 144, None, "jpeg")
+        self.assertTrue(rendered.is_file())
+        with Image.open(rendered) as image:
+            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.size, (600, 800))
+
     def test_small_black_and_white_drawing_is_detected(self):
         image = Image.new("RGB", (600, 800), "white")
         draw = ImageDraw.Draw(image)

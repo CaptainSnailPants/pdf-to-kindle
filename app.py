@@ -1067,4 +1067,13 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    if os.environ.get("PDF_TO_KINDLE_SELF_TEST") == "1":
+        import kindle_converter as converter
+        print(json.dumps({
+            "frozen": bool(getattr(__import__("sys"), "frozen", False)),
+            "tesseract": converter._tool("tesseract"),
+            "ocr_languages": converter.available_ocr_languages(),
+            "pymupdf": converter.fitz is not None,
+        }, ensure_ascii=False))
+    else:
+        App().mainloop()
