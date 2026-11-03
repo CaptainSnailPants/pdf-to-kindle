@@ -4,7 +4,7 @@ from PIL import Image
 
 root = Path(__file__).resolve().parent
 source = root / "assets" / "app-icon.png"
-target = root / "PDF til Kindle.app" / "Contents" / "Resources" / "AppIcon.icns"
+target = root / "PDF to Kindle.app" / "Contents" / "Resources" / "AppIcon.icns"
 
 with Image.open(source) as image:
     icon = image.convert("RGBA")

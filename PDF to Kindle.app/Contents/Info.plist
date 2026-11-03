@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key>
-  <string>da</string>
+  <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>PDF til Kindle</string>
+  <string>PDF to Kindle</string>
   <key>CFBundleExecutable</key>
-  <string>pdf-til-kindle</string>
+  <string>pdf-to-kindle</string>
   <key>CFBundleIdentifier</key>
   <string>dk.local.pdftokindle</string>
   <key>CFBundleIconFile</key>
@@ -15,7 +15,7 @@
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>PDF til Kindle</string>
+  <string>PDF to Kindle</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

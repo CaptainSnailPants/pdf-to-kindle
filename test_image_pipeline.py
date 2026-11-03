@@ -64,7 +64,7 @@ class ImagePipelineTests(unittest.TestCase):
                 mock.patch.object(converter.Path, "home", return_value=self.root):
             self.assertEqual(
                 converter._local_tessdata_dir(),
-                self.root / "Library" / "Application Support" / "PDF til Kindle" / "tessdata",
+                self.root / "Library" / "Application Support" / "PDF to Kindle" / "tessdata",
             )
 
     def test_bundled_tool_has_priority_in_frozen_resource_directory(self):
@@ -324,9 +324,9 @@ class ImagePipelineTests(unittest.TestCase):
                 {"model": "test", "input": "test"},
                 converter.ConversionOptions("Book", api_key="x", ai_model="test"),
                 status=statuses.append, max_attempts=1)
-        self.assertTrue(any("· 1 sek. gået" in message for message in statuses))
-        self.assertTrue(any("· 2 sek. gået" in message for message in statuses))
-        self.assertEqual(statuses[-1], "OpenAI-svar modtaget")
+        self.assertTrue(any("· 1 s elapsed" in message for message in statuses))
+        self.assertTrue(any("· 2 s elapsed" in message for message in statuses))
+        self.assertEqual(statuses[-1], "OpenAI reply received")
 
     def test_openai_reaches_delayed_recovery_attempt_with_same_idempotency_key(self):
         class FakeResponse:
@@ -403,7 +403,7 @@ class ImagePipelineTests(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         self.assertEqual(corrected, {0: "Rettet"})
         self.assertEqual(usage, {"input_tokens": 21, "output_tokens": 5})
-        self.assertTrue(any("prøver tekstportionen igen" in message for message in statuses))
+        self.assertTrue(any("retrying the text chunk" in message for message in statuses))
 
     def test_ai_cleanup_preserves_successful_batches_if_later_batch_is_invalid(self):
         first = converter.ContentBlock("paragraph", 0, "A" * 3000)
@@ -411,12 +411,12 @@ class ImagePipelineTests(unittest.TestCase):
         warnings = []
         with mock.patch.object(
                 converter, "_ai_request",
-                side_effect=[({0: "Første portion rettet"}, {"input_tokens": 10, "output_tokens": 5}),
+                side_effect=[({0: "First chunk corrected"}, {"input_tokens": 10, "output_tokens": 5}),
                              converter.AIStructuredOutputError("invalid")]):
             result = converter._ai_cleanup(
                 [[first, second]], converter.ConversionOptions("Book", ai_model="test"),
                 lambda *_: None, None, warning=warnings.append)
-        self.assertEqual(first.text, "Første portion rettet")
+        self.assertEqual(first.text, "First chunk corrected")
         self.assertEqual(second.text, "B" * 3000)
         self.assertEqual(result, {"completed_batches": 1, "failed_batches": 1, "total_batches": 2})
         self.assertEqual(len(warnings), 1)

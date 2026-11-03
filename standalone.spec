@@ -6,14 +6,14 @@ from PyInstaller.utils.hooks import collect_all
 
 
 project_root = Path(SPECPATH)
-vendor_dir = project_root / "PDF til Kindle.app" / "Contents" / "Resources" / "vendor"
+vendor_dir = project_root / "PDF to Kindle.app" / "Contents" / "Resources" / "vendor"
 sys.path.insert(0, str(vendor_dir))
 
 pymupdf_datas, pymupdf_binaries, pymupdf_hiddenimports = collect_all("pymupdf")
 
 tesseract_command = shutil.which("tesseract")
 if not tesseract_command:
-    raise SystemExit("Tesseract blev ikke fundet. Installér det med: brew install tesseract")
+    raise SystemExit("Tesseract was not found. Install it with: brew install tesseract")
 tesseract_binary = Path(tesseract_command).resolve()
 
 tessdata_candidates = [
@@ -23,7 +23,7 @@ tessdata_candidates = [
 ]
 tessdata_dir = next((path for path in tessdata_candidates if (path / "eng.traineddata").is_file()), None)
 if tessdata_dir is None:
-    raise SystemExit("Tesseracts engelske sprogdata blev ikke fundet.")
+    raise SystemExit("Tesseract's English language data was not found.")
 
 datas = [
     (str(project_root / "assets" / "app-icon.png"), "."),
@@ -55,7 +55,7 @@ executable = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="PDF til Kindle",
+    name="PDF to Kindle",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -71,16 +71,16 @@ collection = COLLECT(
     analysis.datas,
     strip=False,
     upx=False,
-    name="PDF til Kindle",
+    name="PDF to Kindle",
 )
 
 app = BUNDLE(
     collection,
-    name="PDF til Kindle.app",
-    icon=str(project_root / "PDF til Kindle.app" / "Contents" / "Resources" / "AppIcon.icns"),
+    name="PDF to Kindle.app",
+    icon=str(project_root / "PDF to Kindle.app" / "Contents" / "Resources" / "AppIcon.icns"),
     bundle_identifier="dk.local.pdftokindle",
     info_plist={
-        "CFBundleDisplayName": "PDF til Kindle",
+        "CFBundleDisplayName": "PDF to Kindle",
         "CFBundleShortVersionString": "1.0.0",
         "CFBundleVersion": "1",
         "LSMinimumSystemVersion": "13.0",
