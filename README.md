@@ -1,89 +1,100 @@
-# PDF til Kindle
+# PDF to Kindle
 
-![PDF til Kindle-appikon](assets/app-icon.png)
+![PDF to Kindle app icon](assets/app-icon.png)
 
-En lokal macOS-app, der omdanner PDF-filer til reflowable EPUB til **Send to Kindle**.
+A local macOS app that turns PDF files into reflowable EPUB books for **Send to Kindle**.
 
-Vinduet tilpasser automatisk sin størrelse til de synlige indstillinger. AI-indstillingerne er samlet i kompakte, vandrette rækker, så handlingsknapperne og statusområdet normalt kan ses uden scrolling, også når AI er aktiveret. På meget små skærme fungerer scrolling stadig som reserve.
+The window resizes itself to fit the settings that are visible. The AI settings sit in compact horizontal rows, so the action buttons and the status area are usually visible without scrolling, even with AI turned on. On very small screens, scrolling still works as a fallback.
 
-Appen følger automatisk macOS' lyse eller mørke udseende. Tekst, felter, statuskort, dropdownmenuer og deaktiverede kontroller skifter til et kontraststærkt farvesæt, også hvis systemets udseende ændres, mens appen er åben.
+The app follows macOS light and dark appearance automatically. Text, fields, status cards, dropdown menus and disabled controls switch to a high-contrast palette, also when the system appearance changes while the app is open.
 
-Under konverteringen deaktiveres alle indstillinger og handlingsknapper undtagen **Afbryd**. En fremhævet fasetekst skelner mellem lokal behandling, afventning af brugerens AI-godkendelse, behandling via OpenAI API og lokal opbygning af Kindle-filen. Den detaljerede status viser løbende side- eller tekstportionsnummer.
+During a conversion, every setting and action button except **Cancel** is disabled. A highlighted phase label tells apart local processing, waiting for the user's AI approval, processing through the OpenAI API, and building the Kindle file locally. The detailed status shows the current page or text chunk number.
 
-## Fejltolerance
+## Getting started
 
-- Midlertidige OpenAI-fejl, timeouts og rate limits forsøges automatisk igen op til seks gange. Efter de første hurtige genforsøg bruger appen længere, synlige pauser, så en kortvarig API- eller netværksforstyrrelse sent i en stor bog ikke straks sender resten over på lokal OCR.
-- AI-tekst opdeles i korte portioner på cirka 3.500 tegn. Under hvert API-kald vises faktisk forløbet ventetid og aktuelt forsøg; det lokale ETA skjules. Efter første afsluttede AI-kald beregnes resterende AI-tid ud fra de målte svartider.
-- Netværkskald kører i en separat afbrydelig tråd, så **Afbryd** reagerer med det samme i stedet for at vente på HTTP-timeout.
-- Ventestatus indeholder altid den overordnede enhed, eksempelvis **Tekstportion 3 af 12** eller **Billedside 4 af 20**, så et nyt API-kald ikke ligner en nulstillet løkke. Hvert forsøg har en absolut grænse på 180 sekunder. Mellem forsøgene tæller status ned gennem pauser på normalt 2, 8, 30, 90 og 180 sekunder; en eventuel `Retry-After`-anvisning fra API'et respekteres, hvis den er længere.
-- Alle transportgenforsøg for samme tekstportion bruger den samme idempotency-nøgle. Dermed kan appen sikkert prøve igen, hvis forbindelsen tabes efter afsendelsen, uden at et allerede modtaget kald bevidst oprettes som en ny opgave. Klient- og server-request-ID logges uden dokumenttekst eller API-nøgle, så vedvarende fejl kan spores.
-- Opbrugt API-kvote, ugyldig nøgle, ugyldigt modelsvar eller vedvarende netværksfejl kasserer ikke OCR-arbejdet. Appen færdiggør automatisk en lokal EPUB og fortæller tydeligt, hvilken AI-del der blev sprunget over.
-- AI-tekstkorrektioner bevares portionsvis. Hvis en senere portion fejler, beholdes rettelserne fra alle gennemførte portioner, mens kun den berørte portion falder tilbage til OCR-teksten.
-- AI-svar til tekst og illustrationer kræves som strengt struktureret JSON efter et schema. Parseren kan desuden udtrække JSON, hvis en model alligevel tilføjer forklarende tekst omkring svaret.
-- Ved AI-billedfejl fjernes de delvise AI-resultater, og den lokale illustrationsanalyse bruges som reserve.
-- EPUB-output skrives og valideres under et midlertidigt navn og erstatter først destinationsfilen, når hele filen er gyldig.
-- Forsøg på at lukke appen under behandling kræver bekræftelse og udløser kontrolleret afbrydelse.
+1. Double-click **PDF to Kindle.app** in the project folder.
+2. Choose a PDF, title, author and OCR language.
+3. Click **Create Kindle file…** and upload the finished `.epub` with Send to Kindle.
 
-Det diskrete tekstlink **Developer** øverst til højre åbner adgang til en roterende logfil under `~/Library/Logs/PDF til Kindle/`. **Åbn log** viser filen, mens **Kopiér diagnostik** samler systemversion, Python-version, valgte indstillinger og de seneste loglinjer. Loggen roterer ved 2 MB og gemmer højst tre ældre filer. API-nøgler, dokumenttekst og sidebilleder logges aldrig.
+During the conversion the app shows a running estimate of the time left. **Cancel** stops the active PDF rendering or OCR process and cleans up temporary files. The settings are locked while the conversion runs.
 
-Under en konvertering starter appen macOS `caffeinate`, som forhindrer automatisk inaktivitetssleep, indtil processen er færdig eller afbrudt. Skærmen kan stadig slukke. Tvungen sleep, eksempelvis når låget lukkes, håndteres efter opvågning af API-timeout, retry og lokal fallback; EPUB-output erstattes fortsat kun atomisk efter validering.
+The app automatically removes page numbers and headers and footers that repeat across the document.
 
-## Start
-
-1. Dobbeltklik på **PDF til Kindle.app** i projektmappen.
-2. Vælg PDF, titel, forfatter og OCR-sprog.
-3. Klik **Opret Kindle-fil…** og upload den færdige `.epub` via Send to Kindle.
-
-Under konverteringen viser appen et løbende estimat for den resterende tid. Knappen **Afbryd** stopper den aktive PDF-rendering eller OCR-proces og rydder midlertidige filer op. Indstillingerne er låst, mens konverteringen kører.
-
-Appen fjerner automatisk sidetal samt sidehoveder og sidefødder, der gentages på tværs af dokumentet.
-
-## Selvstændig macOS-app
-
-Kør `./build_standalone.command` for at bygge `standalone-dist/PDF til Kindle.app`. Denne udgave indeholder Python, Pillow, PyMuPDF, Tesseract og engelske OCR-data og kan flyttes ud af projektmappen eller lægges i Programmer. Poppler er ikke nødvendigt i standalone-udgaven, fordi PDF-sider renderes med den indbyggede PyMuPDF-runtime.
-
-Andre understøttede OCR-sprog downloades fortsat først, når de vælges. I standalone-udgaven gemmes de i `~/Library/Application Support/PDF til Kindle/tessdata`, så app-pakken ikke behøver at være skrivbar.
-
-Builden er ad hoc-signeret lokalt og kræver ikke et Apple Developer-certifikat. Den er beregnet til den Mac-arkitektur, den bygges på; denne projektbuild er derfor Intel/x86_64. Første start kan kræve højreklik → **Åbn**, fordi appen ikke er notariseret af Apple.
-
-Kindle-kapitler oprettes ud fra tydelige kapitelmarkører og OCR-typografi. Markører som **Kapitel 3**, **Del II** og nummererede titler genkendes direkte. En kort typografisk overskrift kan også starte et kapitel, når den står først på en side efter en passende mængde brødtekst. Almindelige PDF-sideskift opretter ikke længere kapitler.
-
-Den valgfrie **AI-efterbehandling** sender OCR-teksten i mindre portioner til OpenAI Responses API. Modelmenuen hentes dynamisk ud fra de modeller, API-projektet har adgang til. Når OCR er færdig, viser appen estimerede inputtokens, outputtokens og samlet tokenforbrug og beder om godkendelse, før teksten sendes. Modellen instrueres i kun at rette tydelige OCR-fejl, orddeling, mellemrum og tegnsætning uden at forkorte, oversætte eller omskrive teksten. Funktionen er slået fra som standard og kræver en OpenAI API-nøgle. Nøglen kan gemmes sikkert i macOS-nøglering. API-forbrug afregnes separat af OpenAI og er ikke nødvendigvis inkluderet i et ChatGPT-abonnement.
-
-Systeminstruktionerne, der sendes til OpenAI, er skrevet på engelsk for at være entydige på tværs af modeller. De kræver samtidig eksplicit, at dokumentets oprindelige sprog bevares, og at teksten aldrig oversættes eller omskrives.
-
-**AI til illustrationer** kan vælges separat under AI-efterbehandling. Et lokalt filter udvælger først sider med sandsynlige illustrationer, og kun disse sidebilleder sendes til den valgte multimodale model. Modellen skelner illustrationer fra tekst, returnerer beskæringskoordinater og vælger den nærmeste OCR-tekstblok som placering. Beskæringen udføres derefter lokalt på den højopløste side. Dialogen før API-kaldet viser både antallet af sidebilleder og et konservativt tokenestimat.
-
-AI-panelet er skjult, indtil **Brug AI til at forbedre resultatet** vælges. Her kan tekstkorrektur og billedanalyse slås til uafhængigt, modellen vælges, og arbejdsgangen sættes til enten **Spørg før afsendelse** eller **Send automatisk efter OCR**. Den nederste hjælpetekst forklarer den valgte model og viser tokenestimatet, når det er beregnet.
-
-AI-integrationen er designet specifikt til OpenAI API. Den kræver en OpenAI API-nøgle, og API-forbrug afregnes separat fra et ChatGPT-abonnement; dette fremgår også direkte i appens AI-panel.
-
-Knappen **Opdatér modeller** henter først API-projektets aktuelle modeladgang. Et lille baggrundskald vælger derefter tre relevante modeller og søger kun i officiel OpenAI-dokumentation efter beskrivelser og standardpriser. Der ligger ingen modelnavne, beskrivelser eller priser hardcoded i appen. En pris vises kun, når metadata-kaldet kan bekræfte den; ellers står der **Pris ukendt**. Resultatet gemmes lokalt og genbruges mellem appstarter. Appen foretager kun en ny model- og metadataforespørgsel, når brugeren selv trykker **Opdatér modeller**. Ved **Spørg før afsendelse** vises det samlede tokenestimat én gang samt de tre anbefalinger med profil, begrundelse og estimeret pris. Ved automatisk afsendelse bruges modelvalget fra hovedvinduet.
-
-API-nøglen kan gemmes i macOS-nøglering og indlæses automatisk ved næste opstart. Den gemmes aldrig i projektfiler eller logfiler og kan fjernes igen med **Glem nøgle**. HTTPS-kald bruger macOS' verificerede CA-certifikatbundle (med `certifi` som reserve); SSL-verifikation deaktiveres aldrig.
-
-Hvis macOS blokerer appen første gang, så højreklik på den og vælg **Åbn**. `start.command` kan bruges som reserve.
-
-App-pakken indeholder sin egen kopi af programkoden, så macOS ikke behøver at give launcheren særskilt adgang til filer uden for appen. Hvis kildekoden ændres, kan app-pakken opdateres ved at køre `./build_app.command`.
-
-Alternativt fra Terminal:
+From Terminal:
 
 ```bash
 python3 app.py
 ```
 
-## Krav
+If macOS blocks the app the first time, right-click it and choose **Open**.
+`start.command` can be used as a fallback.
 
-- Python 3 med Tkinter og Pillow
-- Poppler (`pdftoppm`)
+The app bundle contains its own copy of the program code, so macOS does not have to grant the launcher separate access to files outside the app. After changing the source code, update the bundle by running `./build_app.command`.
+
+## Requirements
+
+- Python 3 with Tkinter and Pillow
+- PyMuPDF (`pip install pymupdf`) or Poppler (`pdftoppm`)
 - Tesseract OCR
 
-Appen tilbyder dansk, engelsk, tysk, fransk, spansk, norsk og svensk. Når brugeren vælger et sprog, der mangler lokalt, hentes den officielle `tessdata_fast`-model med det samme. Statuslinjen og fremdriftsbjælken viser downloadstatus. Modellen gemmes i appen og genbruges næste gang.
+The app offers Danish, English, German, French, Spanish, Norwegian and Swedish. When the user picks a language that is not installed, the official `tessdata_fast` model is downloaded right away. The status line and progress bar show the download. The model is stored in the app and reused next time.
 
-Appen gemmer ikke eller sender dokumenter online. Den laver OCR lokalt. Tekstens blokke, overskrifter, lister og indryk rekonstrueres ud fra OCR-koordinaterne. Fotos, diagrammer og andre tætte områder uden tekst udskæres og placeres i læserækkefølgen mellem tekstblokkene.
+The app does not store or upload documents. OCR runs locally. Blocks, headings, lists and indentation are rebuilt from the OCR coordinates. Photos, diagrams and other dense areas without text are cropped out and placed in reading order between the text blocks.
 
-## Begrænsninger i første version
+## Chapters
 
-- Tabeller, fodnoter og tekst i flere spalter kan kræve manuel efterbehandling.
-- Meget dekorative sider og illustrationer med tekst oven på billedet kan stadig kræve manuel efterbehandling.
-- Håndskrift og meget dårlige scanninger afhænger af Tesseracts OCR-kvalitet.
+Kindle chapters are created from clear chapter markers and OCR typography. Markers such as **Chapter 3**, **Part II** and numbered titles are recognized directly (Danish markers such as **Kapitel 3** and **Del II** work too). A short typographic heading can also start a chapter when it comes first on a page after a reasonable amount of body text. Ordinary PDF page breaks do not create chapters.
+
+## Optional AI post-processing
+
+**AI post-processing** sends the OCR text in small chunks to the OpenAI Responses API. The model menu is loaded dynamically from the models the API project has access to. When OCR is done, the app shows estimated input tokens, output tokens and total token usage, and asks for approval before the text is sent. The model is told to fix only clear OCR errors, hyphenation, spacing and punctuation, without shortening, translating or rewriting the text. The feature is off by default and needs an OpenAI API key. The key can be stored securely in the macOS Keychain. API usage is billed separately by OpenAI and is not necessarily included in a ChatGPT subscription.
+
+The system instructions sent to OpenAI are written in English so they are unambiguous across models. They also explicitly require that the document's original language is kept and that the text is never translated or rewritten.
+
+**AI for illustrations** can be chosen separately. A local filter first picks pages with likely illustrations, and only those page images are sent to the chosen multimodal model. The model tells illustrations apart from text, returns crop coordinates and picks the nearest OCR text block as the placement. The crop itself is done locally on the high-resolution page. The dialog before the API call shows both the number of page images and a conservative token estimate.
+
+The AI panel is hidden until **Use the OpenAI API to improve the result** is checked. There, text correction and image analysis can be turned on independently, the model can be chosen, and the workflow can be set to either **Ask before sending** or **Send automatically after OCR**.
+
+**Refresh models** first loads the API project's current model access. A small background call then picks three relevant models and searches only official OpenAI documentation for descriptions and standard prices. No model names, descriptions or prices are hardcoded in the app. A price is shown only when the metadata call can confirm it; otherwise the app shows **Price unknown**. The result is cached locally and reused between launches. The app only queries models again when the user clicks **Refresh models**.
+
+The API key can be stored in the macOS Keychain and loaded automatically at the next launch. It is never written to project files or log files and can be removed again with the ✕ button. HTTPS calls use macOS' verified CA bundle (with `certifi` as a fallback); SSL verification is never turned off.
+
+## Fault tolerance
+
+- Temporary OpenAI errors, timeouts and rate limits are retried automatically up to six times. After the first quick retries the app uses longer, visible pauses, so a short API or network hiccup late in a big book does not push the rest over to local OCR.
+- AI text is split into short chunks of about 3,500 characters. During each API call the app shows the elapsed waiting time and the current attempt; the local ETA is hidden. After the first finished AI call, the remaining AI time is estimated from measured response times.
+- Network calls run in a separate cancellable thread, so **Cancel** reacts at once instead of waiting for an HTTP timeout.
+- The waiting status always names the overall unit, for example **Text chunk 3 of 12** or **Image page 4 of 20**, so a new API call does not look like a reset loop. Each attempt has a hard limit of 180 seconds. Between attempts the status counts down through pauses of normally 2, 8, 30, 90 and 180 seconds; a longer `Retry-After` from the API is respected.
+- All transport retries for the same text chunk use the same idempotency key. The app can therefore retry safely if the connection drops after sending, without deliberately creating a call that was already received as a new job. Client and server request IDs are logged without document text or API key, so persistent errors can be traced.
+- A used-up API quota, an invalid key, an invalid model reply or a persistent network error does not throw away the OCR work. The app finishes a local EPUB automatically and says clearly which AI part was skipped.
+- AI text corrections are kept chunk by chunk. If a later chunk fails, corrections from all finished chunks are kept, and only the affected chunk falls back to the OCR text.
+- AI replies for text and illustrations must be strict structured JSON following a schema. The parser can also extract JSON if a model adds explanatory text around the reply.
+- If AI image analysis fails, the partial AI results are dropped and the local illustration analysis is used as a fallback.
+- The EPUB is written and validated under a temporary name and only replaces the target file once the whole file is valid.
+- Trying to quit the app during processing asks for confirmation and cancels in a controlled way.
+
+The small **Developer** link in the top right corner opens a rotating log file under `~/Library/Logs/PDF to Kindle/`. **Open log** shows the file, and **Copy diagnostics** collects the system version, Python version, chosen settings and the most recent log lines. The log rotates at 2 MB and keeps at most three older files. API keys, document text and page images are never logged.
+
+During a conversion the app runs macOS `caffeinate`, which prevents idle sleep until the process is done or cancelled. The screen can still turn off. Forced sleep, for example when the lid is closed, is handled after wake-up by API timeouts, retries and local fallback; the EPUB is still only replaced atomically after validation.
+
+## Standalone macOS app
+
+Run `./build_standalone.command` to build `standalone-dist/PDF to Kindle.app`. This version contains Python, Pillow, PyMuPDF, Tesseract and English OCR data and can be moved out of the project folder or into Applications. Poppler is not needed in the standalone version, because PDF pages are rendered with the bundled PyMuPDF runtime.
+
+Other supported OCR languages are still downloaded only when chosen. In the standalone version they are stored in `~/Library/Application Support/PDF to Kindle/tessdata`, so the app bundle does not need to be writable.
+
+The build is ad hoc signed locally and does not need an Apple Developer certificate. It targets the Mac architecture it is built on. The first launch may require right-click → **Open**, because the app is not notarized by Apple.
+
+Settings saved by earlier versions under the Danish name `PDF til Kindle` are moved to the new folders automatically at the first launch.
+
+## Tests
+
+```bash
+python3 -m unittest test_image_pipeline
+```
+
+## Known limitations
+
+- Tables, footnotes and multi-column text may need manual cleanup.
+- Very decorative pages and illustrations with text on top of the image may still need manual cleanup.
+- Handwriting and very poor scans depend on Tesseract's OCR quality.

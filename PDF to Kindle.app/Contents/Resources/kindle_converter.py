@@ -29,9 +29,26 @@ from xml.etree import ElementTree as ET
 
 from PIL import Image, ImageDraw, ImageFilter, ImageStat
 
+APP_NAME = "PDF to Kindle"
+LEGACY_APP_NAME = "PDF til Kindle"  # The app's earlier Danish name.
+APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / APP_NAME
+
+
+def migrate_legacy_dirs() -> None:
+    """Move settings, caches and logs saved under the old Danish app name."""
+    library = Path.home() / "Library"
+    for parent in (library / "Application Support", library / "Logs"):
+        old, new = parent / LEGACY_APP_NAME, parent / APP_NAME
+        try:
+            if old.is_dir() and not new.exists():
+                old.rename(new)
+        except OSError:
+            pass
+
+
 VENDOR_DIRS = (
     Path(__file__).resolve().parent / "vendor",
-    Path(__file__).resolve().parent / "PDF til Kindle.app" / "Contents" / "Resources" / "vendor",
+    Path(__file__).resolve().parent / f"{APP_NAME}.app" / "Contents" / "Resources" / "vendor",
 )
 for vendor_dir in VENDOR_DIRS:
     if vendor_dir.exists() and str(vendor_dir) not in sys.path:
@@ -84,7 +101,7 @@ LANGUAGE_DATA_URL = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fa
 
 def _local_tessdata_dir() -> Path:
     if getattr(sys, "frozen", False):
-        return Path.home() / "Library" / "Application Support" / "PDF til Kindle" / "tessdata"
+        return Path.home() / "Library" / "Application Support" / APP_NAME / "tessdata"
     return Path(__file__).resolve().parent / "tessdata"
 
 
@@ -117,7 +134,7 @@ def _ssl_context() -> ssl.SSLContext:
 def fetch_openai_models(api_key: str) -> list[str]:
     """Return likely general-purpose models visible to the supplied API project."""
     if not api_key.strip():
-        raise ValueError("Der mangler en OpenAI API-nøgle.")
+        raise ValueError("An OpenAI API key is missing.")
     request = urllib.request.Request(
         "https://api.openai.com/v1/models",
         headers={"Authorization": f"Bearer {api_key.strip()}", "Accept": "application/json"},
@@ -153,7 +170,7 @@ def recommend_openai_models(api_key: str, model_ids: list[str], needs_images: bo
                 "required": ["model_id", "profile", "reason", "description", "input_price", "output_price"],
                 "properties": {
                     "model_id": {"type": "string", "enum": candidates},
-                    "profile": {"type": "string", "enum": ["Bedste balance", "Laveste pris", "Højeste kvalitet"]},
+                    "profile": {"type": "string", "enum": ["Best balance", "Lowest price", "Highest quality"]},
                     "reason": {"type": "string", "maxLength": 180},
                     "description": {"type": "string", "maxLength": 220},
                     "input_price": {"type": ["number", "null"], "minimum": 0},
@@ -169,9 +186,9 @@ def recommend_openai_models(api_key: str, model_ids: list[str], needs_images: bo
         "instructions": (
             "Recommend models for a PDF-to-EPUB application. Select only from the supplied IDs. Return distinct "
             "models. Optimize the three choices respectively for best balance, lowest likely cost, and highest "
-            "output quality. For each selected model, provide a short Danish description. Supply the current standard "
+            "output quality. For each selected model, provide a short English description. Supply the current standard "
             "USD price per one million input and output tokens only when you can verify it from official OpenAI "
-            "information; otherwise return null. Never infer or guess a price. Write each practical reason in Danish."
+            "information; otherwise return null. Never infer or guess a price. Write each practical reason in English."
         ),
         "input": f"Task: {task}\nAvailable model IDs: {json.dumps(candidates)}",
         "tools": [{"type": "web_search", "filters": {
@@ -238,7 +255,7 @@ def _tool(name: str) -> str:
     bundled = Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override" / name
     if bundled.exists():
         return str(bundled)
-    raise RuntimeError(f"Programmet '{name}' blev ikke fundet.")
+    raise RuntimeError(f"The program '{name}' was not found.")
 
 
 def available_ocr_languages() -> list[str]:
@@ -262,32 +279,32 @@ def ensure_ocr_language(code: str, progress=lambda message, fraction: None,
     if code in available_ocr_languages():
         return None
     if not re.fullmatch(r"[a-z]{3}(?:_[A-Za-z]+)?", code):
-        raise ValueError("Ugyldig sprogkode.")
+        raise ValueError("Invalid language code.")
     local_file.parent.mkdir(parents=True, exist_ok=True)
     temporary = local_file.with_suffix(".traineddata.part")
-    request = urllib.request.Request(LANGUAGE_DATA_URL.format(code=code), headers={"User-Agent": "PDF-til-Kindle/0.2"})
+    request = urllib.request.Request(LANGUAGE_DATA_URL.format(code=code), headers={"User-Agent": "PDF-to-Kindle/0.2"})
     try:
         with urllib.request.urlopen(request, timeout=30, context=_ssl_context()) as response, temporary.open("wb") as stream:
             total = int(response.headers.get("Content-Length", 0))
             received = 0
             while True:
                 if cancel_event and cancel_event.is_set():
-                    raise ConversionCancelled("Konverteringen blev afbrudt.")
+                    raise ConversionCancelled("The conversion was cancelled.")
                 chunk = response.read(128 * 1024)
                 if not chunk:
                     break
                 stream.write(chunk); received += len(chunk)
                 fraction = received / total if total else 0
-                progress(f"Henter OCR-sprog ({round(fraction * 100)} %)", fraction)
+                progress(f"Downloading OCR language ({round(fraction * 100)}%)", fraction)
         if temporary.stat().st_size < 100_000:
-            raise RuntimeError("Den hentede sprogfil var ugyldig eller ufuldstændig.")
+            raise RuntimeError("The downloaded language file was invalid or incomplete.")
         temporary.replace(local_file)
     except ConversionCancelled:
         temporary.unlink(missing_ok=True)
         raise
     except (OSError, urllib.error.URLError) as exc:
         temporary.unlink(missing_ok=True)
-        raise RuntimeError(f"Kunne ikke hente OCR-sproget: {exc}") from exc
+        raise RuntimeError(f"Could not download the OCR language: {exc}") from exc
     return local_file.parent
 
 
@@ -302,11 +319,11 @@ def _run(command: list[str], cancel_event: threading.Event | None = None) -> str
             except subprocess.TimeoutExpired:
                 process.kill()
             process.communicate()
-            raise ConversionCancelled("Konverteringen blev afbrudt.")
+            raise ConversionCancelled("The conversion was cancelled.")
         time.sleep(0.08)
     stdout, stderr = process.communicate()
     if process.returncode:
-        raise RuntimeError(stderr.strip() or "Konverteringen fejlede.")
+        raise RuntimeError(stderr.strip() or "The conversion failed.")
     return stdout
 
 
@@ -710,7 +727,7 @@ def _save_candidate_asset(candidate: IllustrationCandidate, high_res_page: Path 
     if candidate.asset_path:
         return candidate.asset_path, candidate.bbox
     if high_res_page is None:
-        raise RuntimeError("Der mangler en højopløst side til illustrationens crop.")
+        raise RuntimeError("A high-resolution page is missing for the illustration crop.")
     with Image.open(high_res_page) as source:
         image = source.convert("RGB")
         refined = _refine_illustration_bbox(image, candidate.bbox, words, layout_size)
@@ -771,18 +788,18 @@ def _remove_running_margins(pages: list[list[ContentBlock]], heights: list[int])
 
 def _response_text(payload: dict) -> str:
     if not isinstance(payload, dict):
-        raise AIStructuredOutputError("AI-tjenesten returnerede et svar i et ukendt format.")
+        raise AIStructuredOutputError("The AI service returned a reply in an unknown format.")
     response_id = payload.get("id", "unknown")
     response_status = str(payload.get("status", "completed") or "completed")
     if response_status == "incomplete":
         details = payload.get("incomplete_details") or {}
-        reason = details.get("reason", "ukendt årsag") if isinstance(details, dict) else "ukendt årsag"
+        reason = details.get("reason", "unknown reason") if isinstance(details, dict) else "unknown reason"
         logger.warning("OpenAI response incomplete: id=%s reason=%s", response_id, reason)
-        raise AIStructuredOutputError(f"OpenAI-svaret var ufuldstændigt ({reason}).")
+        raise AIStructuredOutputError(f"The OpenAI reply was incomplete ({reason}).")
     if response_status in {"failed", "cancelled"}:
         error = payload.get("error") or {}
         detail = error.get("message", response_status) if isinstance(error, dict) else str(error)
-        raise AIServiceError(f"OpenAI kunne ikke færdiggøre svaret: {detail}")
+        raise AIServiceError(f"OpenAI could not finish the reply: {detail}")
 
     text_parts = []
     content_types = []
@@ -797,8 +814,8 @@ def _response_text(payload: dict) -> str:
                 if content.get("type") == "output_text":
                     text_parts.append(str(content.get("text", "")))
                 elif content.get("type") == "refusal":
-                    refusal = content.get("refusal", "Anmodningen blev afvist.")
-                    raise AIServiceError(f"OpenAI afviste anmodningen: {refusal}")
+                    refusal = content.get("refusal", "The request was refused.")
+                    raise AIServiceError(f"OpenAI refused the request: {refusal}")
     if not text_parts and isinstance(payload.get("output_text"), str):
         text_parts.append(payload["output_text"])
     text = "".join(text_parts)
@@ -826,7 +843,7 @@ def _model_json(text: str):
                 return parsed
             except json.JSONDecodeError:
                 continue
-        raise AIStructuredOutputError("AI-tjenesten returnerede ikke gyldige strukturerede data.")
+        raise AIStructuredOutputError("The AI service did not return valid structured data.")
 
 
 def _openai_response(body: dict, options: ConversionOptions,
@@ -849,7 +866,7 @@ def _openai_response(body: dict, options: ConversionOptions,
     )
     for attempt in range(max_attempts):
         if cancel_event and cancel_event.is_set():
-            raise ConversionCancelled("Konverteringen blev afbrudt.")
+            raise ConversionCancelled("The conversion was cancelled.")
         result_queue = queue.Queue(maxsize=1)
         logger.info("OpenAI request started: model=%s attempt=%s/%s",
                     options.ai_model, attempt + 1, max_attempts)
@@ -872,7 +889,7 @@ def _openai_response(body: dict, options: ConversionOptions,
         last_second = -1
         while True:
             if cancel_event and cancel_event.is_set():
-                raise ConversionCancelled("Konverteringen blev afbrudt.")
+                raise ConversionCancelled("The conversion was cancelled.")
             try:
                 result = result_queue.get(timeout=0.1)
                 break
@@ -880,10 +897,10 @@ def _openai_response(body: dict, options: ConversionOptions,
                 elapsed = int(time.monotonic() - started)
                 if elapsed >= attempt_timeout:
                     result = ("error", TimeoutError(
-                        f"OpenAI-kaldet overskred tidsgrænsen på {attempt_timeout} sekunder"))
+                        f"The OpenAI call exceeded the time limit of {attempt_timeout} seconds"))
                     break
                 if elapsed != last_second:
-                    status(f"Venter på OpenAI · forsøg {attempt + 1} af {max_attempts} · {elapsed} sek. gået")
+                    status(f"Waiting for OpenAI · attempt {attempt + 1} of {max_attempts} · {elapsed} s elapsed")
                     last_second = elapsed
         if result[0] == "ok":
             try:
@@ -892,10 +909,10 @@ def _openai_response(body: dict, options: ConversionOptions,
                 logger.info("OpenAI request completed: model=%s attempt=%s/%s elapsed=%.1fs request_id=%s",
                             options.ai_model, attempt + 1, max_attempts,
                             time.monotonic() - started, request_id)
-                status("OpenAI-svar modtaget")
+                status("OpenAI reply received")
                 return payload
             except json.JSONDecodeError as exc:
-                raise AIServiceError("OpenAI returnerede et ugyldigt HTTP-svar.", retryable=True) from exc
+                raise AIServiceError("OpenAI returned an invalid HTTP response.", retryable=True) from exc
         if result[0] == "http":
             code, raw_detail, response_headers = result[1], result[2].decode("utf-8", "replace"), result[3]
             error_code, detail = "", raw_detail
@@ -908,12 +925,12 @@ def _openai_response(body: dict, options: ConversionOptions,
             retryable = code in {408, 409, 429, 500, 502, 503, 504} and error_code != "insufficient_quota"
             if not retryable or attempt == max_attempts - 1:
                 if error_code == "insufficient_quota":
-                    detail = "API-kontoens kvote er opbrugt."
+                    detail = "The API account quota is used up."
                 logger.error("OpenAI HTTP failure: status=%s code=%s attempt=%s/%s request_id=%s",
                              code, error_code, attempt + 1, max_attempts,
                              response_headers.get("x-request-id", ""))
                 raise AIServiceError(
-                    f"OpenAI kunne ikke gennemføre behandlingen: {detail}",
+                    f"OpenAI could not complete the processing: {detail}",
                     retryable=retryable, status_code=code)
         else:
             exc = result[1]
@@ -921,7 +938,7 @@ def _openai_response(body: dict, options: ConversionOptions,
                 reason = getattr(exc, "reason", str(exc))
                 logger.error("OpenAI connection failure after retries: %s", reason)
                 raise AIServiceError(
-                    f"Forbindelsen til OpenAI fejlede efter flere forsøg: {reason}", retryable=True)
+                    f"The connection to OpenAI failed after several attempts: {reason}", retryable=True)
         configured_delay = retry_delays[min(attempt, len(retry_delays) - 1)] if retry_delays else 0
         retry_after = 0
         if result[0] == "http":
@@ -936,22 +953,22 @@ def _openai_response(body: dict, options: ConversionOptions,
         last_remaining = None
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
-                raise ConversionCancelled("Konverteringen blev afbrudt.")
+                raise ConversionCancelled("The conversion was cancelled.")
             remaining = max(1, math.ceil(deadline - time.monotonic()))
             if remaining != last_remaining:
                 status(
-                    f"Midlertidig OpenAI-fejl · forsøg {attempt + 2} af {max_attempts} "
-                    f"starter om {_time_text(remaining)}"
+                    f"Temporary OpenAI error · attempt {attempt + 2} of {max_attempts} "
+                    f"starts in {_time_text(remaining)}"
                 )
                 last_remaining = remaining
             time.sleep(0.1)
-    raise AIServiceError("OpenAI kunne ikke gennemføre behandlingen.", retryable=True)
+    raise AIServiceError("OpenAI could not complete the processing.", retryable=True)
 
 
 def _ai_request(items: list[dict], options: ConversionOptions, cancel_event: threading.Event | None,
                 status=lambda message: None) -> tuple[dict[int, str], dict]:
     if cancel_event and cancel_event.is_set():
-        raise ConversionCancelled("Konverteringen blev afbrudt.")
+        raise ConversionCancelled("The conversion was cancelled.")
     instructions = (
         "You are proofreading text produced by OCR. Correct only obvious OCR recognition errors, broken words, "
         "spacing, and punctuation. Preserve the document's original language, meaning, quotations, names, "
@@ -989,16 +1006,16 @@ def _ai_request(items: list[dict], options: ConversionOptions, cancel_event: thr
             }
             if set(corrected) != expected_ids:
                 raise AIStructuredOutputError(
-                    f"AI-svaret indeholdt {len(corrected)} af {len(expected_ids)} forventede tekstdele.")
+                    f"The AI reply contained {len(corrected)} of {len(expected_ids)} expected text parts.")
             return corrected, total_usage
         except (AIStructuredOutputError, KeyError, TypeError, ValueError) as exc:
             logger.warning("Structured text response rejected: attempt=%s/2 items=%s error=%s",
                            structured_attempt + 1, len(items), exc)
             if structured_attempt == 1:
                 raise AIStructuredOutputError(
-                    "AI-tjenesten returnerede ikke gyldige strukturerede data efter et ekstra forsøg.") from exc
-            status("Struktureret OpenAI-svar var ufuldstændigt · prøver tekstportionen igen (2 af 2)")
-    raise AIStructuredOutputError("AI-tjenesten returnerede ikke gyldige strukturerede data.")
+                    "The AI service did not return valid structured data after an extra attempt.") from exc
+            status("Structured OpenAI reply was incomplete · retrying the text chunk (2 of 2)")
+    raise AIStructuredOutputError("The AI service did not return valid structured data.")
 
 
 VISION_PROMPT = """Identify genuine visual figures that should be preserved when converting a book page to EPUB.
@@ -1164,7 +1181,7 @@ def _verify_candidates_or_fallback(image_path: Path, candidates: list[Illustrati
         raise
     except (AIServiceError, RuntimeError, json.JSONDecodeError, KeyError, TypeError) as exc:
         fallback = [item for item in candidates if item.local_score >= .42]
-        warning(f"AI-billedanalyse fejlede på side {page_number}; lokale kandidater blev bevaret.")
+        warning(f"AI image analysis failed on page {page_number}; local candidates were kept.")
         logger.warning("Vision page fallback: page=%s error=%s", page_number, exc)
         return fallback, {}, True
 
@@ -1181,7 +1198,7 @@ def _estimate_ai_tokens(batches: list[list[dict]]) -> tuple[int, int]:
 def _time_text(seconds: float) -> str:
     seconds = max(0, round(seconds))
     minutes, seconds = divmod(seconds, 60)
-    return f"{minutes} min. {seconds} sek." if minutes else f"{seconds} sek."
+    return f"{minutes} min {seconds} s" if minutes else f"{seconds} s"
 
 
 def _report_progress(progress, message: str, fraction: float, remaining_seconds=None) -> None:
@@ -1230,7 +1247,7 @@ def _ai_cleanup(pages: list[list[ContentBlock]], options: ConversionOptions, pro
         batches.append(current)
     input_tokens, output_tokens = _estimate_ai_tokens(batches)
     if not approval(input_tokens, output_tokens, options.ai_model):
-        raise ConversionCancelled("AI-efterbehandlingen blev ikke godkendt.")
+        raise ConversionCancelled("The AI post-processing was not approved.")
     actual_input = actual_output = 0
     pending_corrections = {}
     durations = []
@@ -1243,10 +1260,10 @@ def _ai_cleanup(pages: list[list[ContentBlock]], options: ConversionOptions, pro
         expected = statistics.mean(durations) if durations else 45.0
         total_remaining = expected * (len(batches) - completed) + trailing_seconds
         confident_eta = total_remaining if len(durations) >= 2 else None
-        _report_progress(progress, f"Sender tekstportion {batch_number} af {len(batches)} til OpenAI",
+        _report_progress(progress, f"Sending text chunk {batch_number} of {len(batches)} to OpenAI",
                          fraction, confident_eta)
         started = time.monotonic()
-        context = f"Tekstportion {batch_number} af {len(batches)}"
+        context = f"Text chunk {batch_number} of {len(batches)}"
         def report_text_wait(message):
             elapsed = time.monotonic() - started
             average = statistics.mean(durations) if durations else 45.0
@@ -1276,8 +1293,8 @@ def _ai_cleanup(pages: list[list[ContentBlock]], options: ConversionOptions, pro
             logger.warning("Text AI stopped; completed batches preserved: batch=%s/%s error=%s",
                            batch_number, len(batches), exc)
             warning(
-                f"OpenAI-forbindelsen stoppede ved tekstportion {batch_number} af {len(batches)}. "
-                f"Rettelser fra {completed_batches} færdige portioner er bevaret; resten bruger OCR-teksten. {exc}"
+                f"The OpenAI connection stopped at text chunk {batch_number} of {len(batches)}. "
+                f"Corrections from {completed_batches} finished chunks are kept; the rest uses the OCR text. {exc}"
             )
             break
         finally:
@@ -1290,15 +1307,15 @@ def _ai_cleanup(pages: list[list[ContentBlock]], options: ConversionOptions, pro
     for block_index, parts in rebuilt.items():
         text_blocks[block_index].text = " ".join(text for _, text in sorted(parts))
     if actual_input or actual_output:
-        _report_progress(progress, f"AI færdig: {actual_input + actual_output:,} tokens brugt".replace(",", "."),
+        _report_progress(progress, f"AI done: {actual_input + actual_output:,} tokens used",
                          progress_start + progress_span, trailing_seconds if durations else None)
     if failed_batches and not stopped_early:
         logger.info("Text AI completed with local fallback: completed=%s failed=%s total=%s",
                     completed_batches, failed_batches, len(batches))
         warning(
-            f"{failed_batches} af {len(batches)} tekstportioner kunne ikke efterbehandles med AI. "
-            f"AI-rettelserne fra de øvrige {completed_batches} portioner er bevaret; "
-            "de berørte portioner bruger den oprindelige OCR-tekst."
+            f"{failed_batches} of {len(batches)} text chunks could not be post-processed with AI. "
+            f"The AI corrections from the other {completed_batches} chunks are kept; "
+            "the affected chunks use the original OCR text."
         )
     return {"completed_batches": completed_batches, "failed_batches": failed_batches,
             "total_batches": len(batches)}
@@ -1358,7 +1375,7 @@ def _page_count(pdf_path: Path) -> int:
     info = _run([_tool("pdfinfo"), str(pdf_path)])
     match = re.search(r"^Pages:\s+(\d+)", info, re.MULTILINE)
     if not match:
-        raise RuntimeError("Kunne ikke aflæse antallet af sider i PDF'en.")
+        raise RuntimeError("Could not read the number of pages in the PDF.")
     return int(match.group(1))
 
 
@@ -1371,7 +1388,7 @@ def _render_page(pdf_path: Path, page_number: int, output_prefix: Path, dpi: int
     if fitz is not None:
         try:
             if cancel_event and cancel_event.is_set():
-                raise ConversionCancelled("Konverteringen blev afbrudt.")
+                raise ConversionCancelled("The conversion was cancelled.")
             with fitz.open(str(pdf_path)) as document:
                 page = document[page_number-1]
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
@@ -1393,7 +1410,7 @@ def _render_page(pdf_path: Path, page_number: int, output_prefix: Path, dpi: int
     command.extend([str(pdf_path), str(output_prefix)])
     _run(command, cancel_event)
     if not rendered.exists():
-        raise RuntimeError(f"Side {page_number} kunne ikke klargøres.")
+        raise RuntimeError(f"Page {page_number} could not be prepared.")
     return rendered
 
 
@@ -1474,7 +1491,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
     logger.info("Conversion started: file=%s ai_text=%s ai_images=%s model=%s",
                 pdf_path.name, options.ai_cleanup, options.ai_illustrations, options.ai_model)
     if not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
-        raise ValueError("Vælg en gyldig PDF-fil.")
+        raise ValueError("Choose a valid PDF file.")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     process_images = _should_process_images(options)
 
@@ -1500,10 +1517,10 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
         render_durations = []
         for index in range(1, total_pages + 1):
             if cancel_event and cancel_event.is_set():
-                raise ConversionCancelled("Konverteringen blev afbrudt.")
+                raise ConversionCancelled("The conversion was cancelled.")
             render_average = statistics.mean(render_durations) if render_durations else render_unit
             remaining = (total_pages - index + 1) * render_average + total_pages * (ocr_unit + image_unit) + estimated_text_batches * text_unit + epub_unit
-            _report_progress(progress, f"Klargør side {index} af {total_pages}",
+            _report_progress(progress, f"Preparing page {index} of {total_pages}",
                              planned_fraction((index - 1) * render_unit),
                              remaining if len(render_durations) >= 2 and not (options.ai_cleanup or options.ai_illustrations) else None)
             render_started = time.monotonic()
@@ -1518,10 +1535,10 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
         ocr_durations = []
         for index, page in enumerate(pages, 1):
             if cancel_event and cancel_event.is_set():
-                raise ConversionCancelled("Konverteringen blev afbrudt.")
+                raise ConversionCancelled("The conversion was cancelled.")
             ocr_average = statistics.mean(ocr_durations) if ocr_durations else ocr_unit
             remaining = (total_pages - index + 1) * ocr_average + total_pages * image_unit + estimated_text_batches * text_unit + epub_unit
-            _report_progress(progress, f"OCR: side {index} af {len(pages)}",
+            _report_progress(progress, f"OCR: page {index} of {len(pages)}",
                              planned_fraction(total_pages * render_unit + (index - 1) * ocr_unit),
                              remaining if len(ocr_durations) >= 2 and not (options.ai_cleanup or options.ai_illustrations) else None)
             ocr_started = time.monotonic()
@@ -1552,7 +1569,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
         if options.ai_illustrations and process_images:
             _report_progress(
                 progress,
-                f"Lokalt billedfilter: {len(vision_pages)} af {total_pages} sider kræver AI-verifikation",
+                f"Local image filter: {len(vision_pages)} of {total_pages} pages need AI verification",
                 planned_fraction(total_pages * (render_unit + ocr_unit)), None,
             )
         text_characters = sum(len(block.text) for page in page_data for block in page
@@ -1571,7 +1588,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
         image_span = image_weight / planned_total
         if options.ai_cleanup or (options.ai_illustrations and vision_pages):
             if not options.api_key.strip():
-                warning("Der mangler en OpenAI API-nøgle. AI-delen springes over.")
+                warning("An OpenAI API key is missing. The AI step is skipped.")
                 options.ai_cleanup = False
                 options.ai_illustrations = False
             else:
@@ -1594,7 +1611,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
                     selected_model = ai_approval(
                         estimated_input, estimated_output, options.ai_model, len(vision_pages))
                 if not selected_model:
-                    raise ConversionCancelled("AI-behandlingen blev ikke godkendt.")
+                    raise ConversionCancelled("The AI processing was not approved.")
                 options.ai_model = selected_model
 
         if options.ai_cleanup:
@@ -1606,7 +1623,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
             except (AIServiceError, RuntimeError, json.JSONDecodeError) as exc:
                 warning(str(exc))
                 logger.warning("Text AI failed; preserving OCR text and continuing image pipeline: %s", exc)
-                _report_progress(progress, "AI-tekstrettelse fejlede – OCR-teksten bevares", text_start + text_span,
+                _report_progress(progress, "AI text correction failed – the OCR text is kept", text_start + text_span,
                                  image_weight + epub_unit)
 
         accepted_by_page = {page_number: [item for item in native_by_page.get(page_number, [])
@@ -1627,7 +1644,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
                     remaining = average * (len(vision_pages)-completed) + epub_unit
                     _report_progress(
                         progress,
-                        f"Verificerer illustrationer på PDF-side {page_number} ({position} af {len(vision_pages)})",
+                        f"Verifying illustrations on PDF page {page_number} ({position} of {len(vision_pages)})",
                         fraction, remaining if len(image_durations) >= 2 else None)
                     started = time.monotonic()
 
@@ -1639,7 +1656,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
                         live = image_start + image_span * min(
                             len(vision_pages), page_position-1 + min(.9, elapsed/max(current_average, 1))) / max(1, len(vision_pages))
                         _report_progress(progress,
-                                         f"Billedside {page_position} af {len(vision_pages)} · {status_message}",
+                                         f"Image page {page_position} of {len(vision_pages)} · {status_message}",
                                          live, remaining_now if len(image_durations) >= 2 else None)
                     accepted_local, usage, used_fallback = _verify_candidates_or_fallback(
                         page, local_candidates, options, cancel_event, report_image_wait, warning)
@@ -1660,7 +1677,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
                     continue
                 _report_progress(
                     progress,
-                    f"Klargør illustrationer: side {materialize_index} af {len(illustration_pages)}",
+                    f"Preparing illustrations: page {materialize_index} of {len(illustration_pages)}",
                     min(.975, image_start + image_span), None)
                 high_res_page = None
                 if any(candidate.asset_path is None for candidate in candidates):
@@ -1726,8 +1743,8 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
             vision_input, vision_output)
 
         if cancel_event and cancel_event.is_set():
-            raise ConversionCancelled("Konverteringen blev afbrudt.")
-        _report_progress(progress, "Bygger EPUB…", 0.985, epub_unit)
+            raise ConversionCancelled("The conversion was cancelled.")
+        _report_progress(progress, "Building EPUB…", 0.985, epub_unit)
         partial_output = output_path.with_name(f".{output_path.name}.partial")
         partial_output.unlink(missing_ok=True)
         try:
@@ -1738,7 +1755,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
         except Exception:
             partial_output.unlink(missing_ok=True)
             raise
-        _report_progress(progress, "Færdig", 1.0, 0)
+        _report_progress(progress, "Done", 1.0, 0)
     return output_path
 
 
@@ -1790,8 +1807,8 @@ def _write_epub(output: Path, pages: list[list[ContentBlock]], options: Conversi
         nav_items.append(f'<li><a href="text/{name}">{html.escape(chapter_data.title)}</a></li>')
 
     nav = ("<?xml version=\"1.0\" encoding=\"utf-8\"?><html xmlns=\"http://www.w3.org/1999/xhtml\" "
-           "xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>Indhold</title></head><body>"
-           f"<nav epub:type=\"toc\"><h1>Indhold</h1><ol>{''.join(nav_items)}</ol></nav></body></html>")
+           "xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>Contents</title></head><body>"
+           f"<nav epub:type=\"toc\"><h1>Contents</h1><ol>{''.join(nav_items)}</ol></nav></body></html>")
     package = ("<?xml version=\"1.0\" encoding=\"utf-8\"?><package xmlns=\"http://www.idpf.org/2007/opf\" "
                "version=\"3.0\" unique-identifier=\"book-id\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">"
                f"<dc:identifier id=\"book-id\">urn:local:{book_id}</dc:identifier><dc:title>{html.escape(options.title)}</dc:title>"
@@ -1818,7 +1835,7 @@ def _write_epub(output: Path, pages: list[list[ContentBlock]], options: Conversi
 def validate_epub(path: Path) -> None:
     with zipfile.ZipFile(path) as archive:
         if archive.namelist()[0] != "mimetype":
-            raise RuntimeError("Ugyldig EPUB: mimetype ligger forkert.")
+            raise RuntimeError("Invalid EPUB: mimetype is in the wrong place.")
         ET.fromstring(archive.read("EPUB/package.opf"))
         ET.fromstring(archive.read("EPUB/nav.xhtml"))
         for name in archive.namelist():
