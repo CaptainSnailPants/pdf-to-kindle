@@ -23,6 +23,7 @@ import threading
 import time
 import uuid
 import zipfile
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -63,6 +64,9 @@ except ImportError:  # Native extraction is an optional optimization.
 
 logger = logging.getLogger("pdf_to_kindle.converter")
 
+# PyMuPDF is not thread-safe, so every call into it goes through this lock.
+FITZ_LOCK = threading.RLock()
+
 
 @dataclass
 class ConversionOptions:
@@ -77,6 +81,7 @@ class ConversionOptions:
     ai_model: str = ""
     illustration_model: str = "gpt-5.6-luna"
     illustration_retries: int = 2
+    use_text_layer: bool = True
 
 
 class ConversionCancelled(Exception):
@@ -115,8 +120,11 @@ def _bundled_tessdata_dir() -> Path:
 
 def _command_environment(command: list[str]) -> dict[str, str]:
     environment = os.environ.copy()
-    if command and Path(command[0]).name == "tesseract" and _bundled_tessdata_dir().exists():
-        environment["TESSDATA_PREFIX"] = str(_bundled_tessdata_dir())
+    if command and Path(command[0]).name == "tesseract":
+        # Several pages are OCR'd in parallel, so each Tesseract process uses one thread.
+        environment.setdefault("OMP_THREAD_LIMIT", "1")
+        if _bundled_tessdata_dir().exists():
+            environment["TESSDATA_PREFIX"] = str(_bundled_tessdata_dir())
     return environment
 
 
@@ -220,6 +228,7 @@ class ContentBlock:
     x2: int = 0
     caption: str = ""
     caption_above: bool = False
+    markup: str = ""
 
 
 @dataclass
@@ -354,7 +363,10 @@ def _ocr_layout(image: Path, language: str, cancel_event: threading.Event | None
     return words
 
 
-def _text_blocks(words: list[dict], page_width: int) -> list[ContentBlock]:
+FOOTNOTE_PATTERN = re.compile(r"^(?:\d{1,3}|[*†‡§¹²³⁴⁵⁶⁷⁸⁹⁰]+)(?:[\s.):]|$)")
+
+
+def _text_blocks(words: list[dict], page_width: int, page_height: int | None = None) -> list[ContentBlock]:
     groups = {}
     for word in words:
         groups.setdefault((word["block"], word["paragraph"]), []).append(word)
@@ -383,8 +395,202 @@ def _text_blocks(words: list[dict], page_width: int) -> list[ContentBlock]:
             kind = "paragraph"
         css_class = "indented" if left > page_width * 0.16 else ""
         bottom = max(w["top"] + w["height"] for w in group)
+        if (page_height and kind != "heading" and top > page_height * 0.68
+                and average_height < median_height * 0.9 and FOOTNOTE_PATTERN.match(text)):
+            kind, css_class = "paragraph", "footnote"
         blocks.append(ContentBlock(kind, top, text=text, css_class=css_class, bottom=bottom,
                                    x1=left, x2=right))
+    return blocks
+
+
+TEXT_LAYER_MIN_WORDS = 15
+TEXT_LAYER_MIN_CHARS = 80
+
+
+def _text_layer_is_usable(words: list[tuple]) -> bool:
+    """True when the PDF's own text looks like real, readable text."""
+    text = "".join(str(item[4]) for item in words)
+    if len(words) < TEXT_LAYER_MIN_WORDS or len(text) < TEXT_LAYER_MIN_CHARS:
+        return False
+    broken = sum(1 for char in text if char == "\ufffd" or "\ue000" <= char <= "\uf8ff"
+                 or (ord(char) < 32 and char not in "\t\n"))
+    readable = sum(1 for char in text if char.isalnum())
+    return broken / len(text) < 0.02 and readable / len(text) > 0.6
+
+
+def _table_markup(rows: list[list]) -> tuple[str, str]:
+    """Return (xhtml, plain_text) for extracted table rows; the first row becomes the header."""
+    cleaned = [[re.sub(r"\s+", " ", str(cell or "")).strip() for cell in row] for row in rows]
+    cleaned = [row for row in cleaned if any(row)]
+    if len(cleaned) < 2:
+        return "", ""
+    markup = ["<table>"]
+    for number, row in enumerate(cleaned):
+        tag = "th" if number == 0 else "td"
+        markup.append("<tr>" + "".join(f"<{tag}>{html.escape(cell)}</{tag}>" for cell in row) + "</tr>")
+    markup.append("</table>")
+    return "".join(markup), "\n".join(" | ".join(row) for row in cleaned)
+
+
+def _native_page_layout(pdf_path: Path, page_number: int, image_size: tuple[int, int]):
+    """Read words and tables from the PDF's text layer, in rendered-pixel coordinates.
+
+    Returns (words, tables) or None when the page has no usable text, so the
+    page is OCR'd instead. Words use the same keys as Tesseract's output.
+    """
+    if fitz is None:
+        return None
+    width, height = image_size
+    try:
+        with FITZ_LOCK, fitz.open(str(pdf_path)) as document:
+            page = document[page_number - 1]
+            raw = page.get_text("words")
+            if not _text_layer_is_usable(raw):
+                return None
+            matrix = page.rotation_matrix if page.rotation else None
+            scale_x, scale_y = width / page.rect.width, height / page.rect.height
+
+            def pixels(rect):
+                rect = fitz.Rect(rect)
+                if matrix is not None:
+                    rect = rect * matrix
+                rect.normalize()
+                return (round(rect.x0 * scale_x), round(rect.y0 * scale_y),
+                        round(rect.x1 * scale_x), round(rect.y1 * scale_y))
+
+            tables = []
+            if hasattr(page, "find_tables"):
+                try:
+                    for table in page.find_tables().tables:
+                        rows = table.extract()
+                        if len(rows) < 2 or max(len(row) for row in rows) < 2:
+                            continue
+                        markup, plain = _table_markup(rows)
+                        if markup:
+                            tables.append((pixels(table.bbox), markup, plain))
+                except Exception as exc:  # Table detection is best effort.
+                    logger.info("Table detection failed on page %s: %s", page_number, exc)
+            words = []
+            for x0, y0, x1, y1, text, block, line, _number in raw:
+                left, top, right, bottom = pixels((x0, y0, x1, y1))
+                center_x, center_y = (left + right) / 2, (top + bottom) / 2
+                if any(box[0] <= center_x <= box[2] and box[1] <= center_y <= box[3]
+                       for box, _, _ in tables):
+                    continue
+                words.append({"text": text, "left": left, "top": top, "width": max(1, right - left),
+                              "height": max(1, bottom - top), "block": block, "paragraph": 0,
+                              "line": line})
+            _split_native_paragraphs(words)
+            return words, tables
+    except Exception as exc:
+        logger.warning("Reading the text layer failed on page %s; using OCR: %s", page_number, exc)
+        return None
+
+
+def _split_native_paragraphs(words: list[dict]) -> None:
+    """Number paragraphs inside each PDF text block.
+
+    A PDF block can hold several paragraphs. A new one starts after a clear
+    vertical gap, or when a line is indented after a line that ended short.
+    """
+    lines = {}
+    for word in words:
+        lines.setdefault((word["block"], word["line"]), []).append(word)
+    by_block = {}
+    for (block, _line), members in lines.items():
+        by_block.setdefault(block, []).append(members)
+    for members_list in by_block.values():
+        boxes = []
+        for members in members_list:
+            boxes.append((min(w["top"] for w in members), min(w["left"] for w in members),
+                          max(w["left"] + w["width"] for w in members),
+                          max(w["top"] + w["height"] for w in members), members))
+        boxes.sort(key=lambda box: box[0])
+        block_left = min(box[1] for box in boxes)
+        block_right = max(box[2] for box in boxes)
+        heights = [box[3] - box[0] for box in boxes]
+        line_height = statistics.median(heights) if heights else 10
+        paragraph = 0
+        previous = None
+        for box in boxes:
+            if previous is not None:
+                gap = box[0] - previous[3]
+                ended_short = previous[2] < block_left + (block_right - block_left) * 0.85
+                indented = box[1] > block_left + line_height * 0.9
+                if gap > line_height * 0.8 or (ended_short and indented):
+                    paragraph += 1
+            for word in box[4]:
+                word["paragraph"] = paragraph
+            previous = box
+
+
+def _order_columns(blocks: list[ContentBlock], page_width: int) -> list[ContentBlock]:
+    """Put two-column text in reading order: left column, then right, band by band.
+
+    Blocks that span both columns (titles, wide figures) split the page into
+    bands. Single-column pages keep their original order.
+    """
+    middle, slack = page_width / 2, page_width * 0.04
+    def side(block):
+        if block.x2 <= middle + slack:
+            return "left"
+        if block.x1 >= middle - slack:
+            return "right"
+        return "wide"
+    sides = [side(block) for block in blocks]
+    if sides.count("left") < 2 or sides.count("right") < 2:
+        return blocks
+    ordered, left, right = [], [], []
+    for block, where in sorted(zip(blocks, sides), key=lambda item: item[0].y):
+        if where == "wide":
+            ordered += sorted(left, key=lambda b: b.y) + sorted(right, key=lambda b: b.y) + [block]
+            left, right = [], []
+        else:
+            (left if where == "left" else right).append(block)
+    return ordered + sorted(left, key=lambda b: b.y) + sorted(right, key=lambda b: b.y)
+
+
+def _native_text_mask(words: list[dict], tables: list) -> list[dict]:
+    """Extra boxes covering whole text lines and tables on text-layer pages.
+
+    Illustration detection treats these areas as text, so gaps between words
+    and table ruling lines are not mistaken for pictures.
+    """
+    def box(left, top, right, bottom, pad):
+        return {"text": "", "left": left - pad, "top": top - pad, "width": right - left + 2 * pad,
+                "height": bottom - top + 2 * pad, "block": -1, "paragraph": 0, "line": 0}
+    lines = {}
+    for word in words:
+        lines.setdefault((word["block"], word["line"]), []).append(word)
+    mask = [box(min(w["left"] for w in line), min(w["top"] for w in line),
+                max(w["left"] + w["width"] for w in line), max(w["top"] + w["height"] for w in line), 4)
+            for line in lines.values()]
+    mask += [box(*bbox, 12) for bbox, _, _ in tables]
+    return mask
+
+
+def _column_indents(blocks: list[ContentBlock], page_width: int) -> None:
+    """Measure indentation from the column's left edge, not the page's, on two-column pages."""
+    middle = page_width / 2
+    right = [block for block in blocks if block.x1 >= middle - page_width * 0.04]
+    left = [block for block in blocks if block.x2 <= middle + page_width * 0.04]
+    if len(left) < 2 or len(right) < 2:
+        return
+    for column in (left, right):
+        edge = min(block.x1 for block in column)
+        for block in column:
+            if block.css_class == "indented":
+                block.css_class = "indented" if block.x1 - edge > page_width * 0.08 else ""
+
+
+def _native_blocks(words: list[dict], tables: list, width: int, height: int) -> list[ContentBlock]:
+    blocks = _order_columns(_text_blocks(words, width, height), width) if words else []
+    _column_indents(blocks, width)
+    for (left, top, right, bottom), markup, plain in tables:
+        table = ContentBlock("table", top, text=plain, bottom=bottom, x1=left, x2=right, markup=markup)
+        position = next((index for index, block in enumerate(blocks)
+                         if block.y >= top and min(right, block.x2) > max(left, block.x1)), len(blocks))
+        blocks.insert(position, table)
     return blocks
 
 
@@ -776,7 +982,7 @@ def _remove_running_margins(pages: list[list[ContentBlock]], heights: list[int])
     for page_number, zone, key, _ in candidates:
         counts.setdefault((zone, key), set()).add(page_number)
     repeated_minimum = 2 if len(pages) < 8 else max(3, round(len(pages) * 0.3))
-    page_number_pattern = re.compile(r"^(?:side\s*)?[-–—]?\s*(?:\d+|[ivxlcdm]+)\s*[-–—]?$", re.I)
+    page_number_pattern = re.compile(r"^(?:(?:side|page)\s*)?[-–—]?\s*(?:\d+|[ivxlcdm]+)\s*[-–—]?$", re.I)
     remove_ids = set()
     for _, zone, key, block in candidates:
         is_page_number = zone == "bottom" and bool(page_number_pattern.fullmatch(block.text.strip()))
@@ -1230,7 +1436,8 @@ def _ai_cleanup(pages: list[list[ContentBlock]], options: ConversionOptions, pro
                 approval=lambda input_tokens, output_tokens, model: True,
                 progress_start=0.0, progress_span=1.0, trailing_seconds=0.0,
                 warning=lambda message: None) -> dict:
-    text_blocks = [block for page in pages for block in page if block.kind != "image" and block.text.strip()]
+    text_blocks = [block for page in pages for block in page
+                   if block.kind not in {"image", "table"} and block.text.strip()]
     if not text_blocks:
         return {"completed_batches": 0, "failed_batches": 0, "total_batches": 0}
     batches, current, length, fragment_map = [], [], 0, {}
@@ -1389,7 +1596,7 @@ def _render_page(pdf_path: Path, page_number: int, output_prefix: Path, dpi: int
         try:
             if cancel_event and cancel_event.is_set():
                 raise ConversionCancelled("The conversion was cancelled.")
-            with fitz.open(str(pdf_path)) as document:
+            with FITZ_LOCK, fitz.open(str(pdf_path)) as document:
                 page = document[page_number-1]
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
                 mode = "RGB" if pixmap.n == 3 else "RGBA"
@@ -1513,42 +1720,79 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
         def planned_fraction(completed_seconds):
             return min(0.985, completed_seconds / max(planned_total, 1.0))
 
-        pages = []
-        render_durations = []
-        for index in range(1, total_pages + 1):
-            if cancel_event and cancel_event.is_set():
-                raise ConversionCancelled("The conversion was cancelled.")
-            render_average = statistics.mean(render_durations) if render_durations else render_unit
-            remaining = (total_pages - index + 1) * render_average + total_pages * (ocr_unit + image_unit) + estimated_text_batches * text_unit + epub_unit
-            _report_progress(progress, f"Preparing page {index} of {total_pages}",
-                             planned_fraction((index - 1) * render_unit),
-                             remaining if len(render_durations) >= 2 and not (options.ai_cleanup or options.ai_illustrations) else None)
-            render_started = time.monotonic()
-            rendered = _render_page(pdf_path, index, temp / f"page-{index:05d}",
-                                    options.dpi, cancel_event)
-            pages.append(rendered)
-            render_durations.append(time.monotonic() - render_started)
+        pages: list[Path] = [None] * total_pages
+        page_data: list[list[ContentBlock]] = [None] * total_pages
+        page_heights = [0] * total_pages
+        page_words: list[list[dict]] = [None] * total_pages
+        workers = max(1, min(4, (os.cpu_count() or 2) - 1))
+        local_started = time.monotonic()
+        done = {"pages": 0, "text_layer": 0, "ocr": 0}
+        no_cloud_eta = not (options.ai_cleanup or options.ai_illustrations)
 
-        page_data = []
-        page_heights = []
-        page_words = []
-        ocr_durations = []
-        for index, page in enumerate(pages, 1):
+        def report_local():
+            completed = done["pages"]
+            remaining = None
+            if completed >= 2 and no_cloud_eta:
+                per_page = (time.monotonic() - local_started) / completed
+                remaining = per_page * (total_pages - completed) + epub_unit
+            detail = f" · {done['ocr']} with OCR" if done["ocr"] else ""
+            _report_progress(progress, f"Reading text: {completed} of {total_pages} pages done{detail}",
+                             planned_fraction(completed * (render_unit + ocr_unit)), remaining)
+
+        def finish_ocr(future):
+            index, words = future.result()
+            with Image.open(pages[index - 1]) as rendered:
+                page_data[index - 1] = _text_blocks(words, rendered.width, rendered.height)
+            page_words[index - 1] = words
+            done["pages"] += 1
+            done["ocr"] += 1
+
+        def ocr_page(index):
             if cancel_event and cancel_event.is_set():
                 raise ConversionCancelled("The conversion was cancelled.")
-            ocr_average = statistics.mean(ocr_durations) if ocr_durations else ocr_unit
-            remaining = (total_pages - index + 1) * ocr_average + total_pages * image_unit + estimated_text_batches * text_unit + epub_unit
-            _report_progress(progress, f"OCR: page {index} of {len(pages)}",
-                             planned_fraction(total_pages * render_unit + (index - 1) * ocr_unit),
-                             remaining if len(ocr_durations) >= 2 and not (options.ai_cleanup or options.ai_illustrations) else None)
-            ocr_started = time.monotonic()
-            words = _ocr_layout(page, options.language, cancel_event)
-            page_words.append(words)
-            with Image.open(page) as rendered:
-                blocks = _text_blocks(words, rendered.width)
-                page_heights.append(rendered.height)
-            page_data.append(blocks)
-            ocr_durations.append(time.monotonic() - ocr_started)
+            return index, _ocr_layout(pages[index - 1], options.language, cancel_event)
+
+        pool = ThreadPoolExecutor(max_workers=workers)
+        pending = set()
+        try:
+            for index in range(1, total_pages + 1):
+                if cancel_event and cancel_event.is_set():
+                    raise ConversionCancelled("The conversion was cancelled.")
+                rendered = _render_page(pdf_path, index, temp / f"page-{index:05d}", options.dpi, cancel_event)
+                pages[index - 1] = rendered
+                with Image.open(rendered) as image:
+                    size = image.size
+                page_heights[index - 1] = size[1]
+                native = _native_page_layout(pdf_path, index, size) if options.use_text_layer else None
+                if native is not None:
+                    words, tables = native
+                    page_data[index - 1] = _native_blocks(words, tables, *size)
+                    page_words[index - 1] = words + _native_text_mask(words, tables)
+                    done["pages"] += 1
+                    done["text_layer"] += 1
+                else:
+                    pending.add(pool.submit(ocr_page, index))
+                finished = {future for future in pending if future.done()}
+                for future in finished:
+                    finish_ocr(future)
+                pending -= finished
+                report_local()
+            while pending:
+                if cancel_event and cancel_event.is_set():
+                    raise ConversionCancelled("The conversion was cancelled.")
+                finished, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    finish_ocr(future)
+                if finished:
+                    report_local()
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            raise
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+        logger.info("Text extraction: pages=%s text_layer=%s ocr=%s workers=%s seconds=%.1f",
+                    total_pages, done["text_layer"], done["ocr"], workers, time.monotonic() - local_started)
 
         page_data = _remove_running_margins(page_data, page_heights)
         native_by_page = {}
@@ -1593,7 +1837,7 @@ def convert_pdf_to_epub(pdf_path: Path, output_path: Path, options: ConversionOp
                 options.ai_illustrations = False
             else:
                 text_items = [{"id": i, "text": block.text} for i, block in enumerate(
-                    block for page in page_data for block in page if block.kind != "image" and block.text.strip()
+                    block for page in page_data for block in page if block.kind not in {"image", "table"} and block.text.strip()
                 )] if options.ai_cleanup else []
                 text_estimated_input, text_estimated_output = (
                     _estimate_ai_tokens([text_items]) if text_items else (0, 0))
@@ -1776,6 +2020,8 @@ def _write_epub(output: Path, pages: list[list[ContentBlock]], options: Conversi
             elif block.kind == "list":
                 cleaned = re.sub(r"^(?:[•●▪◦]|[-–—]|\d+[.)])\s*", "", block.text)
                 body.append(f"<ul><li>{html.escape(cleaned)}</li></ul>")
+            elif block.kind == "table" and block.markup:
+                body.append(f'<div class="table">{block.markup}</div>')
             elif block.kind == "image" and block.image:
                 image_data = block.image.read_bytes()
                 digest = hashlib.sha256(image_data).hexdigest()
@@ -1817,7 +2063,7 @@ def _write_epub(output: Path, pages: list[list[ContentBlock]], options: Conversi
                '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
                '<item id="css" href="styles/book.css" media-type="text/css"/>' + "".join(manifest) +
                "</manifest><spine>" + "".join(spine) + "</spine></package>")
-    css = """body{font-family:serif;line-height:1.5;margin:5%;}p{margin:0 0 .85em;text-indent:1.15em;orphans:2;widows:2}p.indented{margin-left:1.8em;margin-right:1.2em;text-indent:0}.chapter-title{font-size:1.8em;text-align:center;margin:18% 0 2em;page-break-after:avoid}h2{font-size:1.35em;margin:1.7em 0 .65em;page-break-after:avoid}ul{margin:.4em 0 .9em 1.4em}li{margin:.2em 0}img{display:block;max-width:100%;height:auto;margin:1em auto}figure{margin:1.35em auto;page-break-inside:avoid;text-align:center}figcaption{font-size:.9em;font-style:italic;line-height:1.35;margin:.45em auto 1em;max-width:92%}section{page-break-after:always}"""
+    css = """body{font-family:serif;line-height:1.5;margin:5%;}p{margin:0 0 .85em;text-indent:1.15em;orphans:2;widows:2}p.indented{margin-left:1.8em;margin-right:1.2em;text-indent:0}.chapter-title{font-size:1.8em;text-align:center;margin:18% 0 2em;page-break-after:avoid}h2{font-size:1.35em;margin:1.7em 0 .65em;page-break-after:avoid}ul{margin:.4em 0 .9em 1.4em}li{margin:.2em 0}img{display:block;max-width:100%;height:auto;margin:1em auto}figure{margin:1.35em auto;page-break-inside:avoid;text-align:center}figcaption{font-size:.9em;font-style:italic;line-height:1.35;margin:.45em auto 1em;max-width:92%}section{page-break-after:always}p.footnote{font-size:.82em;line-height:1.35;text-indent:0;margin:.3em 0 .5em}div.table{margin:1em 0}table{border-collapse:collapse;width:100%;font-size:.9em}th,td{border:1px solid #888;padding:.25em .4em;vertical-align:top;text-align:left}th{font-weight:bold}"""
     container = '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>'
 
     with zipfile.ZipFile(output, "w") as archive:

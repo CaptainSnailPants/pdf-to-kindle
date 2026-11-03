@@ -141,6 +141,7 @@ class App(tk.Tk):
         default_code = "dan" if "dan" in installed_codes else "eng"
         self.language = tk.StringVar(value=next(name for name, code in self.language_codes.items() if code == default_code))
         self.keep_visuals = tk.BooleanVar(value=True)
+        self.use_text_layer = tk.BooleanVar(value=True)
         self.ai_enabled = tk.BooleanVar(value=False)
         self.ai_cleanup = tk.BooleanVar(value=True)
         self.ai_illustrations = tk.BooleanVar(value=False)
@@ -306,9 +307,15 @@ class App(tk.Tk):
         self.language_picker = ttk.Combobox(form, textvariable=self.language, values=languages, state="readonly", width=18)
         self.language_picker.grid(row=3, column=1, sticky="w", pady=5)
         self.language_picker.bind("<<ComboboxSelected>>", self._language_selected)
-        self.visuals_picker = ttk.Checkbutton(form, variable=self.keep_visuals, command=self._toggle_ai,
+        options_row = ttk.Frame(form)
+        options_row.grid(row=4, column=1, sticky="w", pady=5)
+        self.text_layer_picker = ttk.Checkbutton(
+            options_row, variable=self.use_text_layer,
+            text="Use the PDF's own text when it has one (faster, no OCR errors)")
+        self.text_layer_picker.pack(anchor="w")
+        self.visuals_picker = ttk.Checkbutton(options_row, variable=self.keep_visuals, command=self._toggle_ai,
                                                text="Find and insert illustrations automatically")
-        self.visuals_picker.grid(row=4, column=1, sticky="w", pady=5)
+        self.visuals_picker.pack(anchor="w", pady=(4, 0))
         self.ai_picker = ttk.Checkbutton(form, variable=self.ai_enabled, command=self._toggle_ai,
                                          text="Use the OpenAI API to improve the result")
         self.ai_picker.grid(row=5, column=1, sticky="w", pady=(8, 4))
@@ -382,7 +389,7 @@ class App(tk.Tk):
         self.save_key_picker = ttk.Checkbutton(key_controls, variable=self.save_key,
                                                text="Save securely in macOS Keychain")
         self.save_key_picker.pack(side="left", padx=(10, 0))
-        self.settings_controls.extend([self.language_picker, self.visuals_picker, self.ai_picker, self.ai_text_picker, self.ai_visuals_picker, self.api_key_entry, self.model_picker, self.illustration_model_picker, self.refresh_models_button])
+        self.settings_controls.extend([self.language_picker, self.text_layer_picker, self.visuals_picker, self.ai_picker, self.ai_text_picker, self.ai_visuals_picker, self.api_key_entry, self.model_picker, self.illustration_model_picker, self.refresh_models_button])
         self.settings_controls.extend([self.confirm_picker, self.auto_picker, self.save_key_picker])
         self.ai_panel.grid_remove()
         form.columnconfigure(1, weight=1)
@@ -684,6 +691,7 @@ class App(tk.Tk):
             ai_illustrations=use_ai and self.ai_illustrations.get(),
             ai_model=self.ai_model.get().strip(),
             illustration_model=self.illustration_model.get().strip(),
+            use_text_layer=self.use_text_layer.get(),
         )
         threading.Thread(target=self._worker, args=(source, Path(target), options, self.cancel_event), daemon=True).start()
 
