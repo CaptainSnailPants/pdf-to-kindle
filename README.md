@@ -20,6 +20,20 @@ During the conversion the app shows a running estimate of the time left. **Cance
 
 The app automatically removes page numbers and headers and footers that repeat across the document.
 
+## Digital PDFs and scans
+
+Many PDFs already contain real text. When a page has a usable text layer, the app reads that text directly instead of running OCR, which is both faster and free of OCR errors. Pages that are scanned images, or whose text layer is missing or garbled, are OCR'd as before, so a mixed PDF works too. The status line shows how many pages needed OCR. The behaviour can be turned off with **Use the PDF's own text when it has one**, for example if a PDF's built-in text is from a poor earlier OCR run.
+
+On pages with a text layer the app also:
+
+- turns tables into real EPUB tables instead of loose lines of text,
+- reads two-column pages column by column instead of across both columns,
+- splits paragraphs that the PDF stores as one text block.
+
+Small numbered notes at the bottom of a page are marked as footnotes and shown in a smaller font, on scanned pages as well.
+
+OCR runs on several pages at once (up to four, depending on the Mac's CPU cores), and each page is rendered and handed to OCR as soon as it is ready, so big scanned books finish noticeably faster.
+
 From Terminal:
 
 ```bash
@@ -90,11 +104,11 @@ Settings saved by earlier versions under the Danish name `PDF til Kindle` are mo
 ## Tests
 
 ```bash
-python3 -m unittest test_image_pipeline
+python3 -m unittest test_image_pipeline test_text_layer
 ```
 
 ## Known limitations
 
-- Tables, footnotes and multi-column text may need manual cleanup.
+- Tables and multi-column text on scanned pages may still need manual cleanup. Footnotes stay at the bottom of their page instead of becoming linked notes.
 - Very decorative pages and illustrations with text on top of the image may still need manual cleanup.
 - Handwriting and very poor scans depend on Tesseract's OCR quality.
